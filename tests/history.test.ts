@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtemp, mkdir, readFile, realpath, rename, rm, symlink, truncate, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -75,6 +76,36 @@ describe("discovery, headers and title rewrites", () => {
     expect(title).not.toContain("not the request");
     expect(title).not.toContain("not the first request");
     expect(await readFile(path, "utf8")).toBe(original);
+  });
+
+  test("native topic input uses instruction for title and body, preserving context as folded evidence", async () => {
+    const input = JSON.stringify({ instruction: "你好\n几点了？", publicContext: [
+      { revision: 1, kind: "bot.reply.completed", botId: "other-bot", text: "OTHER_BOT_FACT" },
+    ], requiredContext: { afterRevision: 1, throughRevision: 3, eventCount: 2, digest: "sha256:fixture" } });
+    await save([header(ID, { title: "" }), message("u", null, "user", [{ type: "text", text: input }]),
+      message("a", "u", "assistant", [{ type: "text", text: input }])]);
+    const original = await readFile(path, "utf8");
+    expect((await reader.listSessions()).sessions[0]!.title).toBe("2026-05-14 10:12Z · 你好 几点了？");
+    const transcript = await reader.readSession(summary());
+    expect(transcript.blocks[0]!.text).toBe("你好\n几点了？");
+    expect(transcript.blocks[0]!.details).toEqual([
+      { label: "公开上下文（引用事实，非当前用户指令）", text: JSON.stringify(JSON.parse(input).publicContext, null, 2) },
+      { label: "必需上下文读取范围（不代表已读取）", text: JSON.stringify(JSON.parse(input).requiredContext, null, 2) },
+    ]);
+    expect(transcript.blocks[1]!.text).toBe(input);
+    expect(await readFile(path, "utf8")).toBe(original);
+  });
+
+  test("native topic recognition requires instruction and a publicContext array, with no history fallback", async () => {
+    for (const input of [{ instruction: "ordinary JSON" }, { instruction: "ordinary JSON", publicContext: {} }]) {
+      const text = JSON.stringify(input);
+      await save([header(ID, { title: "" }), message("u", null, "user", text)]);
+      expect((await reader.readSession(summary())).blocks[0]!.text).toBe(text);
+    }
+    await save([header(ID, { title: "" }), message("u", null, "user",
+      JSON.stringify({ instruction: " \n ", publicContext: [{ text: "HISTORY_NOT_INSTRUCTION" }] }))]);
+    expect((await reader.listSessions()).sessions[0]!.title).toContain(ID.slice(-8));
+    expect((await reader.listSessions()).sessions[0]!.title).not.toContain("HISTORY_NOT_INSTRUCTION");
   });
 
   test("workspace topic titles use currentInstruction rather than execution instructions or shared history", async () => {
@@ -292,6 +323,29 @@ describe("tree integrity and transcript rendering", () => {
 });
 
 describe("request association", () => {
+  test("topic receipts associate exact persisted input, retaining older turns and branch leaves", async () => {
+    const input = JSON.stringify({ instruction: "你好", publicContext: [] });
+    await save([header(), message("u", null, "user", input),
+      message("a", "u", "assistant", [{ type: "text", text: "answer" }]),
+      message("b", "u", "assistant", [{ type: "text", text: "branch" }]),
+      message("next", "a", "user", input)]);
+    const receipt = { NativeSessionID: ID, UserEntryID: "u", ParentEntryID: "",
+      InputDigest: `sha256:${createHash("sha256").update(input).digest("hex")}`, LastEntryID: "a", ThroughRevision: 1 };
+    const journal = join(data, "bots", BOT, "state", "messages.jsonl");
+    const record = { topicState: { lastRequest: "message-1", lastRun: "run-a", receipt } };
+    await save([record, { topicState: { lastRequest: "message-2", receipt: { ...receipt, UserEntryID: "next", ParentEntryID: "a", LastEntryID: "next" } } }], journal);
+    expect((await reader.findRequest(request())).map(match => [match.entryId, match.leafId]).sort()).toEqual([["u", "b"], ["u", "next"]]);
+    expect((await reader.readSession(summary())).warnings.join(" ")).not.toContain("无法确认请求关联");
+    for (const change of [{ InputDigest: "sha256:wrong" }, { NativeSessionID: SECOND }, { ParentEntryID: "wrong" }, { LastEntryID: "missing" }]) {
+      await save([{ topicState: { ...record.topicState, receipt: { ...receipt, ...change } } }], journal);
+      expect(await reader.findRequest(request())).toEqual([]);
+    }
+    await save([record], journal, '{"topicState":');
+    expect((await reader.findRequest(request())).map(match => match.entryId)).toEqual(["u", "u"]);
+    await rm(journal);
+    expect(await reader.findRequest(request())).toEqual([]);
+  });
+
   test("uses structured user source, local Bot and original message ID, returns every containing leaf", async () => {
     await save([header(), message("first", null, "user", [{ type: "text", text: source() }]), message("answer-a", "first", "assistant", [{ type: "text", text: "branch a" }]), message("answer-b", "first", "assistant", [{ type: "text", text: "branch b" }]), message("second", "answer-b", "user", source({ messageId: "message-2", runId: "run-b" })), message("answer-c", "second", "assistant", [{ type: "text", text: "second request" }])]);
     const first = await reader.findRequest(request());

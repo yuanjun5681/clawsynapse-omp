@@ -121,3 +121,10 @@
 - 另在默认端口没有服务时启动第二份全新 HOME，屏幕显示 daemon 离线，历史面板仍可打开并说明暂无本地 Bot；随后启动合成服务，无须重启 omp 即恢复为等待 Bot。未自动创建或启动任何身份。
 - README、设计和测试计划已改为默认自动发现、可选人工覆盖。真实 Agent 模型/工具/子 Agent 验收仍未完成；本节不扩大此前兼容性矩阵或真实 daemon 集成的证明范围。
 - 自动发现包含 Console Bot；其合法的“无 Harness 绑定”不会被误报为历史损坏。扩展自动历史回归同时注册 Agent 与 Console，验证仅列出实际历史、无绑定警告、移出后拒绝旧身份路径、重新加入可继续读取；单独执行该场景 1 pass、0 fail、7 次断言。
+
+## 原生主题消息结构同步
+
+- 对照相邻工作树 `clawsynapse/internal/adapter/topic_context.go`、`topic_receipt.go`、`internal/messaging/topic_context.go` 与 `clawsynapse-bot/workspace_delivery.go`：普通聊天发送本轮文本，主题原生输入为 `{instruction, publicContext, requiredContext?}`，路由不再出现在主题 user 正文中；普通非主题请求仍使用 source/payload 信封。
+- 新增三项回归最初失败：标题暴露 JSON、空指令错误使用结构文本、主题请求无法定位。修改后 `bun test tests/history.test.ts && bun run check` 通过：34 pass、0 fail、150 次断言，类型检查通过。
+- 回归覆盖指令标题/正文、公开上下文折叠、requiredContext 不冒充已读取、assistant JSON 不被拆解、普通 JSON 不误识别、空指令不泄露历史、历史文件不回写；收执覆盖较早轮次、多个叶分支、错误 session/parent/digest/last entry 拒绝、未完整末行与 journal 缺失。
+- macOS `omp/18.18.3` 实际 120×38 PTY、全新 HOME/XDG 与合成主题历史，以 `--no-session --no-extensions -e <本地扩展> --model anthropic/claude-sonnet-4-5` 启动。`/clawsynapse 019700f1` 显示标题和 user 正文“你好！几点了？”，没有 JSON 包装；公开事实和必需读取范围默认折叠。Enter 展开后实际终端输出保留 `botId: other-bot`、`PUBLIC_FACT` 及“不代表已读取”提示。未配置凭据、未调用模型或生产 daemon；已停止测试进程并删除临时数据。本轮不声称真实模型/daemon 端到端验收。

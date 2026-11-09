@@ -123,10 +123,11 @@ GET <endpoint>/v2/bots/<botId>/messages?after=<cursor>&limit=100
 面板行为：
 
 - 会话总览按最近持久化活动排序，直接展示标题与绑定状态；选中行显示 Bot、原生 session ID、最后活动时间，i 查看完整来源。顶部显示当前位置、观察范围与新请求入口，不再经过首页菜单。
-- 非空 title v1 优先，其次非空 header.title；均缺失或为空白时，使用会话创建时间（UTC，分钟精度、Z 后缀）与首条有效 user 请求的单行摘要。ClawSynapse 结构化输入先提取 payload.text / payload.instruction（或字符串 payload）；工作区主题正文为一行执行说明后附 JSON（也接受直接 JSON），识别顶层 conversationId 与 history 数组后只取 currentInstruction，绝不使用共享历史或执行说明充当请求；有效主题的空/缺失指令视为无可用正文，不回退说明文字。普通正文兼容字符串与 text blocks，不因提到 currentInstruction 就误识别为主题。摘要最多 40 个完整字素，空白折叠，超出加省略号。无用户正文时使用时间与短 session ID；只有缺少有效创建时间才退到用户 entry 时间/文件时间。标题仅在读取时派生，不调用模型，不回写 title/header 或被查看历史。
+- 非空 title v1 优先，其次非空 header.title；均缺失或为空白时，使用会话创建时间（UTC，分钟精度、Z 后缀）与首条有效 user 请求的单行摘要。当前原生主题输入以字符串 instruction 与 publicContext 数组共同识别，只取 instruction；公开事实与 requiredContext 范围绝不充当标题。仍可读取既有历史：ClawSynapse 信封提取 payload.text / payload.instruction（或字符串 payload）；旧工作区正文识别 conversationId 与 history 后只取 currentInstruction，不使用共享历史或执行说明。摘要最多 40 个完整字素，空白折叠，超出加省略号；空指令退到时间与短 session ID，不回退上下文。标题仅在读取时派生，不调用模型，不回写 title/header 或被查看历史。
 - binding 已非当前配置时标记历史绑定，不自动接回执行。
 - 新请求可定位对应主会话和请求起点；尚未关联到原生历史时保留请求元数据和明确空态。
 - Enter 后连续阅读所选分支的 user 输入、assistant text、toolCall 与 toolResult，不再把每条消息作为新的详情层级；工具按调用 ID 配对，不按相邻行配对。
+- 原生主题 user 正文仅显示 instruction；非空 publicContext 默认折叠，保留事件种类、作者与 Bot 归属，明确是引用事实而非当前指令。requiredContext 默认折叠并注明范围不代表已读取；插件不调用 reader，不伪造延后上下文内容。assistant 与工具中的相同 JSON 不作指令提取，普通 JSON 也不能仅凭 instruction 字段被误识别。
 - 工具参数/结果、已保存的可读 thinking 默认折叠，Enter 展开/折叠；PgUp/PgDn 翻页，←/→ 跳转消息。按消息、段落与偏移渲染当前页，不拼接整份会话或提前展开全部工具；不可读、redacted 或未保存的推理不作恢复承诺。
 - b 分支、a 子 Agent、r 刷新、i 来源信息；Backspace 返回上一级并恢复列表选择/阅读位置，Esc 始终关闭而不中止任务。只读浏览会话不确认新请求；按 n 打开请求列表后仍仅确认实际绘制条目。
 - 默认选择文件最后一条逻辑 entry 的祖先链；这是文件可推导的默认分支，不保证等于正在运行的 omp 内存选中分支。
@@ -154,11 +155,13 @@ GET <endpoint>/v2/bots/<botId>/messages?after=<cursor>&limit=100
 
 以 `(botId,bindingRevision,nativeSessionId)` 标识本地会话，不以标题或原始 sessionKey 作为唯一键。文件名 UUID 与逻辑 session header.id 应匹配；物理首行可能是 title v1，需要跳过该记录再读 header。
 
-解析 user 消息中的 JSON 输入，检查 `source:"clawsynapse"`、`botId`、`messageId`、`requestId`、`runId`、`from`、`sessionKey` 等字段。此处 source 是正文中的字段，不是 title.source；它是分类线索，不是身份认证。目录、header 与结构化输入共同用于关联。
+普通请求仍解析 user JSON 中的 `source:"clawsynapse"`、`botId` 与 `messageId`。此处 source 是正文中的字段，不是 title.source；它是分类线索，不是身份认证。当前原生主题输入不含路由 ID，不能从 instruction 或 publicContext 中猜测当前请求 ID。
 
 同一会话可以处理多个请求；使用 user entry 标记各请求起点。关联新请求首选本地 Bot + 原始 messageId，并保留 runId 作为执行关联信息；不能只用同名 sessionKey 合并不同发送方。
 
-SessionState 中只有隔离后的摘要与 native UUID，且成功完成后才保存，故不能只依赖该映射寻找执行中或失败前产生的历史。无有效来源标记的文件不伪装成某个请求的历史，应显示无法确认关联原因。
+主题请求使用配置 Bot 的 `state/messages.jsonl` 中追加保存的 `topicState.lastRequest` 与 `receipt` 辅助关联，不把 journal 当成会话列表或消息正文。校验 NativeSessionID、UserEntryID、ParentEntryID、原始 user 输入的 SHA-256 InputDigest，以及 LastEntryID 确实为该 user 的后代；再按原生树返回包含请求的所有叶分支。读取沿用历史文件的路径、符号链接、UTF-8、单行/文件大小与重写检测限制，收执数量受候选上限约束；不存在 journal 时不猜测关联，损坏/超限时明确失败，未完整落盘的最后一行等待刷新。
+
+SessionState 只保留最近一次原生装入基准，不能单独用于关联全部请求；journal 中较早收执可关联较早轮次。执行中或失败前尚无收执的主题仍可浏览，但明确提示无法确认关联。收执只是本地关联证据，不代表身份认证或当前执行状态；不按正文相同、同名 sessionKey 或公开历史中的 messageId 合并请求。
 
 ### 6.3 安全的只读解析
 

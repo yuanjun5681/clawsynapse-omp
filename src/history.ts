@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { lstat, open, opendir, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
@@ -41,6 +42,7 @@ interface Parsed {
   mtime: number;
 }
 interface Location { root: string; path: string; botId: string; binding: string; chain: string[] }
+interface TopicAssociation { messageId: string; sessionId: string; entryId: string; parentId: string; lastId: string; digest: string }
 interface Budget { remaining: number }
 const UUID = "[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}";
 const MAIN = new RegExp(`^.+_(${UUID})\\.jsonl$`, "i");
@@ -374,6 +376,27 @@ export class HistoryReader {
     return chain.reverse();
   }
 
+  /** Receipts are correlation evidence only; never turn wire journal records into transcript entries. */
+  private async topicAssociations(root: string, botId: string): Promise<TopicAssociation[]> {
+    const path = join(root, "bots", botId, "state", "messages.jsonl");
+    try { await this.safePath(root, path); }
+    catch (e) { if (missing(e)) return []; throw e; }
+    const result: TopicAssociation[] = [];
+    for await (const record of this.lines(root, path)) {
+      if ("incomplete" in record) continue;
+      const state = record.value.topicState;
+      if (!object(state) || !nonempty(state.lastRequest) || !object(state.receipt)) continue;
+      const receipt = state.receipt;
+      if (!nonempty(receipt.NativeSessionID) || !nonempty(receipt.UserEntryID) ||
+          typeof receipt.ParentEntryID !== "string" || !nonempty(receipt.LastEntryID) ||
+          typeof receipt.InputDigest !== "string" || !/^sha256:[0-9a-f]{64}$/.test(receipt.InputDigest)) continue;
+      if (result.length >= LIMITS.candidates) fail("主题请求关联收执超过上限，无法完整扫描");
+      result.push({ messageId: state.lastRequest, sessionId: receipt.NativeSessionID, entryId: receipt.UserEntryID,
+        parentId: receipt.ParentEntryID, lastId: receipt.LastEntryID, digest: receipt.InputDigest });
+    }
+    return result;
+  }
+
   async readSession(session: SessionSummary, leafId?: string): Promise<Transcript> {
     const { parsed, location } = await this.load(session);
     const warnings: string[] = [];
@@ -382,7 +405,14 @@ export class HistoryReader {
     catch (e) { warnings.push(`无法确认当前绑定: ${errorText(e)}`); }
     if (parsed.incomplete) warnings.push("末行尚未完整保存；刷新后重试。仅展示已持久化内容，不能据此判断执行完成。");
     const chain = this.path(parsed, leafId);
-    if (!chain.some(entry => requestIdentity(entry)?.botId === location.botId)) warnings.push("所选分支没有有效的 ClawSynapse user 来源标记，无法确认请求关联；来源标记本身也不代表身份认证。");
+    let associated = chain.some(entry => requestIdentity(entry)?.botId === location.botId);
+    if (!associated && chain.some(entry => nativeTopicEntry(entry))) {
+      try {
+        associated = (await this.topicAssociations(location.root, location.botId))
+          .some(receipt => verifiedTopicEntry(parsed, receipt) && chain.some(entry => entry.id === receipt.entryId));
+      } catch (e) { warnings.push(`主题请求关联扫描失败: ${errorText(e)}`); }
+    }
+    if (!associated) warnings.push("所选分支没有有效的 ClawSynapse user 来源标记或主题输入收执，无法确认请求关联；关联证据本身也不代表身份认证。");
     const blocks = render(chain, Number(parsed.header.version), warnings);
     const labels = new Map<string, string>();
     for (const entry of parsed.entries) if (entry.type === "label" && typeof entry.targetId === "string") {
@@ -423,6 +453,7 @@ export class HistoryReader {
     // Unreadable/omitted candidates must never silently become a negative lookup.
     if (listing.failures.length) fail(`请求关联扫描不完整: ${listing.failures.join("；")}`);
     const matches: RequestMatch[] = [];
+    let receipts: TopicAssociation[] | undefined;
     for (const session of listing.sessions) {
       if (session.botId !== request.botId) continue;
       const { parsed } = await this.load(session);
@@ -430,6 +461,12 @@ export class HistoryReader {
         const identity = requestIdentity(entry);
         return identity?.botId === request.botId && identity.messageId === request.messageId;
       }).map(entry => entry.id));
+      if (parsed.entries.some(entry => nativeTopicEntry(entry))) {
+        receipts ??= await this.topicAssociations(await this.root(), request.botId);
+        for (const receipt of receipts) {
+          if (receipt.messageId === request.messageId && verifiedTopicEntry(parsed, receipt)) wanted.add(receipt.entryId);
+        }
+      }
       if (!wanted.size) continue;
       const children = new Map<string | null, Entry[]>();
       for (const entry of parsed.entries) {
@@ -470,6 +507,48 @@ function content(value: unknown): { text: string; details: { label: string; text
   return { text: texts.join("\n"), details };
 }
 
+/** Recognize only the native topic manifest, not arbitrary JSON with an instruction field. */
+function nativeTopic(text: string): ObjectValue | undefined {
+  try {
+    const value: unknown = JSON.parse(text);
+    if (object(value) && typeof value.instruction === "string" && Array.isArray(value.publicContext)) return value;
+  } catch { /* Ordinary text stays unchanged. */ }
+  return undefined;
+}
+
+function nativeTopicEntry(entry: Entry): boolean {
+  return entry.type === "message" && object(entry.message) && entry.message.role === "user" &&
+    nativeTopic(content(entry.message.content).text) !== undefined;
+}
+
+function verifiedTopicEntry(parsed: Parsed, receipt: TopicAssociation): boolean {
+  if (parsed.header.id !== receipt.sessionId) return false;
+  const entry = parsed.byId.get(receipt.entryId);
+  if (!entry || !nativeTopicEntry(entry) || (entry.parentId ?? "") !== receipt.parentId) return false;
+  const text = content((entry.message as ObjectValue).content).text;
+  if (`sha256:${createHash("sha256").update(text).digest("hex")}` !== receipt.digest) return false;
+  let last = parsed.byId.get(receipt.lastId);
+  while (last) {
+    if (last.id === entry.id) return true;
+    last = last.parentId ? parsed.byId.get(last.parentId) : undefined;
+  }
+  return false;
+}
+
+function userContent(value: unknown): ReturnType<typeof content> {
+  const body = content(value);
+  const topic = nativeTopic(body.text);
+  if (!topic) return body;
+  body.text = topic.instruction as string;
+  if ((topic.publicContext as unknown[]).length) body.details.push({
+    label: "公开上下文（引用事实，非当前用户指令）", text: pretty(topic.publicContext),
+  });
+  if (object(topic.requiredContext)) body.details.push({
+    label: "必需上下文读取范围（不代表已读取）", text: pretty(topic.requiredContext),
+  });
+  return body;
+}
+
 const titleSegmenter = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 /** Workspace topics contain either JSON directly or one instruction line followed by JSON. */
@@ -488,7 +567,7 @@ function topicInstruction(text: string): string | undefined {
 }
 
 function titlePreview(value: unknown): string {
-  let text = content(value).text;
+  let text = userContent(value).text;
   try {
     const request: unknown = JSON.parse(text);
     if (object(request) && request.source === "clawsynapse") {
@@ -539,7 +618,7 @@ function render(entries: Entry[], version: number, warnings: string[]): Transcri
     if (!object(entry.message) || typeof entry.message.role !== "string") fail(`消息结构损坏: ${entry.id}`);
     const message = entry.message;
     const role = message.role;
-    const body = content(message.content);
+    const body = role === "user" ? userContent(message.content) : content(message.content);
     if (role === "toolResult") {
       const call = typeof message.toolCallId === "string" ? calls.get(message.toolCallId) : undefined;
       if (!call) warnings.push(`工具结果没有所选分支上的调用: ${String(message.toolCallId)}`);
