@@ -1,6 +1,6 @@
 # ClawSynapse omp 测试验证方案
 
-状态：待实现后执行。本文是验证计划，不是已通过的测试报告；当前仓库仅有文档，没有插件入口、测试脚本、Dockerfile 或验收镜像。
+状态：持续验收计划。仓库现有插件实现、类型检查和行为回归测试；已执行结果单独记录在 [实际验证记录](verification.md)。本文的全部场景不能仅因实现存在就视为通过；目前未制作 Dockerfile 或验收镜像。
 
 ## 1. 环境选择
 
@@ -12,7 +12,7 @@
 | Docker 容器 | 固定版本、干净依赖、HTTP/磁盘/崩溃故障注入、可自动重复的 Linux 检查 | CLI 与 daemon 可用性需另查；TUI 需要 PTY。禁止挂宿主 HOME、SSH agent、Docker socket，禁止 privileged；非 root 运行，持久数据在 Linux volume 中 | 实现后建设自动化与 CI |
 | Orb Ubuntu Linux machine | Bun/omp、ClawSynapse、NATS 和真实 TUI 的完整组合，保留现场便于排障 | 需固定版本并记录安装步骤；有宿主文件/命令集成，不是默认封闭的恶意代码沙箱。测试数据放 guest 自有目录，不复用宿主凭据或数据根 | 首次真实端到端验收，首选 |
 
-`orb -m ubuntu` 是进入**已有名为 ubuntu 的 machine**，不是创建或重置环境。建议使用专用名字，避免污染日常 machine。创建环境属于另一次显式执行操作，本次文档修改不创建 machine、不启动容器、不启动 daemon。
+`orb -m ubuntu` 是进入**已有名为 ubuntu 的 machine**，不是创建或重置环境。使用专用名字避免污染日常 machine；本轮已创建 `clawsynapse-omp-test`，启用 `--isolated --isolate-network`，关闭宿主共享/集成并限制访问其他 machine/宿主 IP，没有使用原有 ubuntu/ubuntu-2 的数据。
 
 ## 2. 共同约束与前置条件
 
@@ -26,7 +26,7 @@
 
 ## 3. Orb Ubuntu 执行路径
 
-以下命令是后续执行入口，尚未在本次修改中执行：
+普通专用 machine 的入口如下。对恶意输入与故障测试，优先使用本轮已验证的隔离创建参数：`orb create --isolated --isolate-network --memory 4G --cpus 2 --disk 12G ubuntu:26.04 clawsynapse-omp-test`；不要覆盖已有同名 machine。
 
 ```sh
 # 在 macOS 上创建专用 machine；已有同名 machine 时先核实用途，不覆盖
@@ -40,7 +40,7 @@ orb -m clawsynapse-omp-test
 2. 安装锁定版本的 Bun、omp、ClawSynapse 和启用 JetStream 的 NATS Server；记录版本。仅在 guest 中配置一次性模型凭据，确认实际调用可用；不从宿主复制整个认证目录。
 3. 清理继承环境并设置测试 HOME/XDG。启动独立 JetStream，确认它使用测试存储目录及测试端口。用 ClawSynapse `init` 的显式 `--config`、`--data-dir`、`--local-api-addr`、`--nats-servers` 参数初始化，运行 `clawsynapsed --config` 指向这份配置；不安装系统服务。
 4. 在同一 guest 的另一终端创建/启动测试 Bot 并建立测试信任。先用 Console 收件链路验证真实业务请求可达，再准备两个 omp Agent 的模型和 binding。
-5. 插件实现后，从 guest 的插件项目目录运行 `omp --extension .`；`.omp/clawsynapse.json` 显式填写 guest 内的 loopback endpoint、DataDir、stateDir 和两个接收方完整 ID。面板中核实数据根和 Bot，再开始发送请求。
+5. 插件实现后，在 guest 的 `~/.omp/clawsynapse.json` 显式填写 guest 内的 loopback endpoint、DataDir、stateDir 和两个接收方完整 ID，再加载插件。用 `/tmp` 等无项目配置的目录启动，核实用户级默认生效；另用完整项目 `.omp/clawsynapse.json` 验证整份覆盖、不混入用户 Bot/token，损坏或 symlink 项目配置不得回退。面板中核实数据根和 Bot，再开始发送请求。
 6. 执行第 5 节场景，并在 daemon 停止后重开历史面板证明离线读取。发布前在 macOS 独立目录补做真实 TUI smoke，覆盖终端宽度、Esc/返回、状态栏、同 UUID 恢复及 SQLite 权限/同步设置。
 
 Docker 路径使用相同逻辑场景：实现后制作包含固定版本依赖的测试镜像，非 root 运行，交互验收分配 PTY，故障数据用独立 volume 或限额 tmpfs；不要求容器内运行 systemd。无模型凭据的 CI 只报告其实际覆盖层级，不冒充完整集成通过。
@@ -84,7 +84,7 @@ Docker 路径使用相同逻辑场景：实现后制作包含固定版本依赖�
 
 首次完整通过要求：设计文档全部验收项有实际对应证据，Orb 或等价 Linux 环境完成真实工具/子 Agent 链路，macOS 原生 TUI smoke 通过。凭据/模型未准备好、插件尚未实现、某环境尚未启动时，明确记录未执行项，不能用 health、HTTP fixture 或数据库原语测试替代。
 
-本次文档修改仅核对了测试工具 CLI 路径、`orb --help` 及官方命令/存储文档；没有创建隔离环境，没有运行插件或真实 Bot 验收。后续运行结果另行记录，不改写本文为未经证明的通过报告。
+本轮已执行模块测试、macOS omp TUI/RPC smoke、真实 ENOSPC，以及独立 Orb 上的真实 Console 收件链路；模型执行、真实工具/子 Agent 和全量 UI 故障交互等仍按计划验收。实际版本、命令、结果和证据边界见 [实际验证记录](verification.md)，不把计划改写为通过报告。
 
 ## 参考
 

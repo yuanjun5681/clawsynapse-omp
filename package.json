@@ -1,0 +1,16 @@
+{
+  "name": "clawsynapse-omp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only ClawSynapse request notifications and native omp history viewer",
+  "files": ["src", "README.md", "docs"],
+  "omp": {"extensions": ["./src/index.ts"]},
+  "scripts": {"check": "tsc --noEmit", "test": "bun test"},
+  "dependencies": {"@oh-my-pi/pi-tui": "18.18.3"},
+  "devDependencies": {
+    "@oh-my-pi/pi-coding-agent": "18.18.3",
+    "@types/bun": "1.3.11",
+    "typescript": "5.9.3"
+  }
+}

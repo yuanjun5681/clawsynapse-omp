@@ -1,6 +1,6 @@
 # ClawSynapse omp 插件设计
 
-状态：设计方案，尚未实现。本文记录已讨论的范围及建议默认行为，不代表已完成兼容性或端到端验收。
+状态：功能已实现，已完成类型检查、逻辑回归、真实 omp TUI/RPC smoke 和隔离 daemon 收件链路验证；尚未完成真实 omp Agent 模型/工具/子 Agent 端到端验收。精确证据与缺失前置条件见 [实际验证记录](verification.md)，不据模块测试推定全部验收通过。
 
 ## 1. 目标与非目标
 
@@ -40,14 +40,14 @@
 
 | 场景 | 示例 |
 |---|---|
-| 正在建立初始游标 | `CS · 连接中` |
-| 已连接且无新请求 | `CS · 已连接` |
-| 有未查看的新请求 | `CS · 2 条新请求 · 来自 n1-abcd…` |
-| daemon 无法连接 | `CS · 离线 · 2 条未查看` |
-| HTTP 错误、鉴权失败或响应非法 | `CS · 查询失败 · 2 条未查看` |
-| 多 Bot 部分查询失败 | `CS · 1/2 Bot 可用 · 2 条新请求` |
+| 正在建立初始游标 | `ClawSynapse · 连接中` |
+| 已连接且无新请求 | `ClawSynapse · 已连接` |
+| 有未查看的新请求 | `ClawSynapse · 2 条新请求 · 来自 User-A` |
+| daemon 无法连接 | `ClawSynapse · 离线 · 2 条未查看` |
+| HTTP 错误、鉴权失败或响应非法 | `ClawSynapse · 查询失败 · 2 条未查看` |
+| 多 Bot 部分查询失败 | `ClawSynapse · 1/2 Bot 可用 · 2 条新请求` |
 
-来源默认使用截短的发送方 Bot ID；没有可靠显示名时不伪造名称。列表详情中可查看完整 ID。状态文字按终端显示宽度截断；所有外部文本遵守第 5 节的安全渲染规则。不要每次轮询弹通知，错误状态只更新状态栏。
+来源名称从接收 Bot 作用域内的 `GET /v2/bots/<botId>/peers` 解析，本地 `localAlias` 优先，其次为签名 discovery 的 `displayName`；未知、空名称或名称查询失败时使用完整发送方 ID，不伪造名称。不同接收 Bot 的别名不混用；名称仅作显示，不改变请求身份或授权，不写入持久观察状态。有未查看请求时在该 Bot 正常轮询后查询，沿用相同 scoped token、loopback/无代理/拒绝重定向、超时和解压后大小上限；只保留当前请求来源名称，单名称最多 8 KiB。名称不可用不暂停消息消费或清除未查看集合，连接详情说明回退原因。请求列表选中行保留完整发送方/接收方 ID。状态文字按终端显示宽度截断；所有外部文本遵守第 5 节的安全渲染规则。不要每次轮询弹通知，错误状态只更新状态栏。
 
 “新请求”是插件观察到且尚未在 `/clawsynapse` 请求列表中确认查看的业务请求，不是 daemon inbox 总数，不是待执行数，也不是对方未读状态。
 
@@ -106,7 +106,7 @@ GET <endpoint>/v2/bots/<botId>/messages?after=<cursor>&limit=100
 | 未查看队列 | 每观察范围最多 1000 条且元数据总计不超过 8 MiB；整页事务若超限则回滚并暂停消费，用户查看释放容量后再追赶 |
 | 状态库 | 最多 128 个观察范围，主库最多 64 MiB（通过页数限制约束）；不得自动淘汰旧范围或未查看记录，新范围/写入超限时报告容量错误 |
 | JSONL 解析 | 单文件最多 64 MiB、单物理行最多 8 MiB、最多 100000 条逻辑 entry；按块读取并检查增长，超限显示明确不可完整读取原因，不拼接“完整历史” |
-| 历史发现与缓存 | 单次发现最多检查 10000 个主会话候选，超限注明列表不完整；每插件进程解析缓存最多 128 MiB，按需淘汰可重建缓存，不预载子 Agent |
+| 历史发现与缓存 | 单次发现最多检查 10000 个目录项（含 binding 与无关文件），超限注明列表不完整；不预载子 Agent。当前不保留跨会话解析缓存，返回旧会话时按标识重新读取；若将来引入缓存，每进程总量不得超过 128 MiB |
 
 暂停消费时状态栏必须说明“容量受限/存储失败，观察已暂停”，保留已有未查看数量；不能继续显示正常已连接。反馈事件也只有在所在整页成功提交时才推进 cursor。超大单页等无法靠查看释放的限制需报告明确原因，不反复高速重试。
 
@@ -116,17 +116,18 @@ GET <endpoint>/v2/bots/<botId>/messages?after=<cursor>&limit=100
 
 | 命令 | 行为 |
 |---|---|
-| `/clawsynapse` | 打开查看面板，包含新请求入口和本地会话列表 |
+| `/clawsynapse` | 直接显示配置范围内全部本地会话总览；n 进入新请求 |
 | `/clawsynapse <session-id>` | 在已配置范围内按完整 ID 或唯一前缀定位本地会话；歧义时选择，不猜测 |
 
 面板行为：
 
-- 会话列表按最近持久化活动排序，展示标题、Bot、binding、原生 session ID、最后活动时间。
+- 会话总览按最近持久化活动排序，直接展示标题与绑定状态；选中行显示 Bot、原生 session ID、最后活动时间，i 查看完整来源。顶部显示当前位置、观察范围与新请求入口，不再经过首页菜单。
+- 非空 title v1 优先，其次非空 header.title；均缺失或为空白时，使用会话创建时间（UTC，分钟精度、Z 后缀）与首条有效 user 请求的单行摘要。ClawSynapse 结构化输入先提取 payload.text / payload.instruction（或字符串 payload）；工作区主题正文为一行执行说明后附 JSON（也接受直接 JSON），识别顶层 conversationId 与 history 数组后只取 currentInstruction，绝不使用共享历史或执行说明充当请求；有效主题的空/缺失指令视为无可用正文，不回退说明文字。普通正文兼容字符串与 text blocks，不因提到 currentInstruction 就误识别为主题。摘要最多 40 个完整字素，空白折叠，超出加省略号。无用户正文时使用时间与短 session ID；只有缺少有效创建时间才退到用户 entry 时间/文件时间。标题仅在读取时派生，不调用模型，不回写 title/header 或被查看历史。
 - binding 已非当前配置时标记历史绑定，不自动接回执行。
 - 新请求可定位对应主会话和请求起点；尚未关联到原生历史时保留请求元数据和明确空态。
-- 详情按所选分支展示 user 输入、assistant text、toolCall 与 toolResult；工具按调用 ID 配对，不按相邻行配对。
-- 工具参数/结果、已保存的可读 thinking 默认折叠；不可读、redacted 或未保存的推理不作恢复承诺。
-- 提供分支选择、子 Agent 入口、刷新、返回和关闭；Esc 关闭，不中止本地或 daemon 的任务。
+- Enter 后连续阅读所选分支的 user 输入、assistant text、toolCall 与 toolResult，不再把每条消息作为新的详情层级；工具按调用 ID 配对，不按相邻行配对。
+- 工具参数/结果、已保存的可读 thinking 默认折叠，Enter 展开/折叠；PgUp/PgDn 翻页，←/→ 跳转消息。按消息、段落与偏移渲染当前页，不拼接整份会话或提前展开全部工具；不可读、redacted 或未保存的推理不作恢复承诺。
+- b 分支、a 子 Agent、r 刷新、i 来源信息；Backspace 返回上一级并恢复列表选择/阅读位置，Esc 始终关闭而不中止任务。只读浏览会话不确认新请求；按 n 打开请求列表后仍仅确认实际绘制条目。
 - 默认选择文件最后一条逻辑 entry 的祖先链；这是文件可推导的默认分支，不保证等于正在运行的 omp 内存选中分支。
 - 执行中只展示已落盘内容并注明限制，不能根据文件停止增长显示“已完成”。
 
@@ -169,7 +170,7 @@ SessionState 中只有隔离后的摘要与 native UUID，且成功完成后才�
 
 ## 7. 插件配置
 
-建议使用项目级 `.omp/clawsynapse.json`，启动时读取并校验；这是插件拟定配置，不是现有 omp 内置配置项。配置变化通过重启插件所在 omp 会话生效。
+默认使用用户级 `~/.omp/clawsynapse.json`，所有工作区直接可用；可选的 `<cwd>/.omp/clawsynapse.json` 具有整份替换优先级，不与用户配置按字段合并，防止混用不同部署的 Bot/token。仅当项目配置不存在（ENOENT）时读取用户配置；项目文件损坏、不可读或为 symlink 时直接报错，不通过回退切换身份。两处均不存在时报告配置错误；不向上搜索父目录。这是插件自有配置，不是 omp 内置配置项，配置变化通过重启插件所在 omp 会话生效。配置来源不改变按交互会话 UUID 隔离的观察范围。
 
 ```json
 {
@@ -186,7 +187,7 @@ SessionState 中只有隔离后的摘要与 native UUID，且成功完成后才�
 - DataDir 必须解析为本机绝对目录；不从请求 payload、会话正文或 header.cwd 动态改写读取根。
 - `stateDir` 解析为本机绝对目录，与 DataDir 及原生历史读取根分离；测试必须显式指定独立目录，不能复用生产状态库。改变 stateDir 不自动复制旧观察状态。
 - polling 间隔为正数，HTTP 超时固定有界；配置错误时命令显示原因，不静默使用另一个 Bot 或数据目录。
-- daemon 现有 loopback 无 token 读取模式可用；如需 scoped token，采用按 Bot 的 tokenFile 配置读取，不把 token 明文写入项目配置或日志。
+- daemon 现有 loopback 无 token 读取模式可用；可选 `tokenFiles` 是按所选完整 Bot ID 索引的私有常规文件路径对象，读取时要求当前用户拥有且权限 0600。不把 token 明文写入项目配置、状态库或日志。
 - HTTP Bot 选择与磁盘 Bot 目录须对应；历史页面注明数据根与 Bot，防止 endpoint 和 DataDir 指向不同部署时误关联。
 
 ## 8. 模块与生命周期
@@ -199,12 +200,16 @@ docs/
   design.md
   omp-plugin-history.md
   testing.md
+  verification.md
 src/
   index.ts       注册工厂、配置、生命周期、连接各模块
+  config.ts      配置校验、loopback 与目录规范化
   client.ts      HTTP 校验、游标轮询、请求分类与取消
   state.ts       SQLite 事务、范围隔离、游标提交与查看确认
   history.ts     目录发现、只读树解析、来源关联、子 Agent
   ui.ts          状态栏与命令面板
+  safety.ts      不可信终端文本转义
+  types.ts       模块共享的数据契约与固定上限
 ```
 
 | 模块 | 对调用方提供的 Interface | 集中的复杂度 |
@@ -220,18 +225,18 @@ src/
 - 使用 `ctx.setInterval` / `ctx.setTimeout` 管理定时器，调用 fetch 时使用 AbortController。
 - `session_switch` 时停止旧观察、取消请求、清除旧状态栏，再从状态库加载新观察范围；异步完成回调须校验当前会话代次，不能污染已切换会话。已开始的短事务保持原观察键，不能在回调中改写为新会话的键。
 - `session_branch` / `session_tree` 后重新核对交互会话 UUID：未变化则保持同一观察状态，变化则按切换流程加载新范围。历史面板里的分支选择只改变所查看的历史，不改变观察键。
-- `session_shutdown` 清 timer、abort HTTP、关闭文件监听和数据库连接、清 widget/status；不依靠退出 hook 才提交游标，运行期每页及查看确认已各自提交。
+- `session_shutdown` 清 timer、abort HTTP、关闭数据库连接、清 status；历史使用显式刷新，不创建文件监听。不依靠退出 hook 才提交游标，运行期每页及查看确认已各自提交。
 - 只使用可核实的公开 omp 扩展接口：`registerCommand`、`ctx.ui.setStatus`、`ctx.ui.custom`、生命周期事件、只读会话标识及当前交互会话的 `ensureOnDisk`；观察状态持久化由插件自有状态库负责。
 
 ## 9. 依赖与发布
 
-使用 `@oh-my-pi/pi-coding-agent` 的公开类型；在实际实现验证后声明受支持的 omp 版本范围，不根据不同缓存版本的源码推定兼容。打包采用 `package.json` 的 `omp.extensions`，可使用 `omp --extension <path>` 开发、`omp plugin link <path>` 本地安装，再独立以 npm 或 Git 发布。
+使用 `@oh-my-pi/pi-coding-agent` 的公开类型，开发依赖固定版本以保证类型检查可复现，但不以该版本作为宿主要求，不声明精确版本 peer dependency，不自动安装或升级 omp。兼容性依据所需公开能力检查与实际验证记录，不要求“最新版本”。缺少会话保存/托管定时器能力时禁用观察而保留历史查看；缺少终端绘制回调时请求列表只读、不自动确认，并持续显示具体原因。打包采用 `package.json` 的 `omp.extensions`，可使用 `omp --extension <path>` 开发、`omp plugin link <path>` 本地安装，再独立以 npm 或 Git 发布。
 
 不复用 clawsynapse 的 Go internal 包；HTTP 与磁盘布局是跨项目依赖。布局变化集中修改 history 模块，协议变化集中修改 client 模块。现阶段不新增 daemon endpoint；若将来要求低延迟推送，再另行定义带 cursor 补读的 SSE 契约，不为单向通知引入 WebSocket。
 
 ## 10. 验收标准
 
-实现后需要在真实 omp TUI 与受控 Bot 上验收；以下均是待执行标准，不是当前验证结果。
+以下是发布前的完整验收标准，不是全部通过声明。已执行场景和仍需真实模型的部分见 [实际验证记录](verification.md)。
 
 1. 已建立基线后远端发送业务请求，状态栏在正常下一次轮询完成后增加新请求；历史反馈事件不增加数量。
 2. 首次运行不把已有 inbox 全部算为新请求；没有任何 assistant 回答的新交互会话先由宿主保存可恢复的 header，再提交基线和新请求；恢复该 UUID 后取回 cursor 和未查看元数据，分页积压不漏读、不重复计数。`--no-session` 或缺少保存能力时明确禁用通知观察，保留只读历史功能。
@@ -250,11 +255,11 @@ src/
 
 ## 11. 当前证据与未验证项
 
-已核对 clawsynapse 源码的专用目录、启动参数和结构化来源字段，已只读抽样普通 omp 的 title/session/message/子 Agent 格式。本机默认 DataDir 的 omp 专用目录存在但为空，尚无 ClawSynapse 真实 omp 请求历史供端到端抽样。插件未实现、未完成 TUI 验收，不能声称以上设计已运行。
+已实现本插件并验证 omp 18.18.3 的公开扩展 Interface。模块回归使用临时目录、真实 SQLite 与本地 HTTP fixture；macOS 实际 omp TUI 已验证视口精确确认、前缀查找、分支/子 Agent 导航及空交互会话强杀后恢复；RPC 本地命令不启动轮询。Orb 独立隔离机中已验证真实 JetStream、daemon、两个 Console 接收 Bot 的观察和状态恢复；这不是 omp Agent 模型执行验证。
 
 详细来源与版本差异记录在 [本地历史调研](omp-plugin-history.md)。其 `internal/...` 来源路径均属于相邻 `clawsynapse` 项目，不属于本插件源码。
 
-本次设计评估另核对了本机缓存 omp 18.13.3 的 `src/extensibility/extensions/types.ts`（`appendEntry` 返回 void）和 `src/session/session-manager.ts`（空会话延迟建文件、追加错误内部记录，以及公开 `ReadonlySessionManager` 中的 `getSessionId/getSessionFile/ensureOnDisk`）。因此取消 custom entries 作为观察状态存储的方案，改用插件自有 SQLite，并以宿主成功保存当前交互会话 header 为启动观察的前提。这些缓存源码证据不代表其他版本；实际实现必须验证目标版本对空会话的正常 resume 与强杀恢复，不能根据方法名推定兼容。SQLite 事务能力已有官方文档依据，但插件事务、崩溃恢复及两平台兼容均尚未实测。
+早期设计曾核对本机缓存 omp 18.13.3 的 `appendEntry`、会话延迟保存及 `ReadonlySessionManager`，据此选择插件自有 SQLite 与宿主 `ensureOnDisk`。实现针对 18.18.3 的公开类型，并用真实 TUI 验证了空会话可恢复身份；不能将这两个版本之间的源码相似视作兼容范围。真实 omp Agent 的模型凭据、工具/子 Agent 执行样本与完整验收仍缺失，尚未声明可发布兼容范围。
 
 官方参考：
 

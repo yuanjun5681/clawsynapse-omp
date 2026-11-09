@@ -62,7 +62,7 @@ ClawSynapse 的 omp adapter 明确传入 `--session-dir`，因此其主会话位
 
 ## 验证边界
 
-以上路径与注入字段已核对本仓 adapter 实现；这是研究结论，不是已实现或已完成端到端验证的插件。
+以上路径与注入字段已核对原 ClawSynapse adapter 实现；本调研本身不构成插件实现或端到端通过的证明。当前实现与已执行检查见 [实际验证记录](verification.md)。
 
 ## 本机只读检查结果
 
