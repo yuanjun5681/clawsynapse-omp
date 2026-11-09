@@ -412,3 +412,31 @@ describe("resource boundaries", () => {
     await expect(reader.findRequest(request())).rejects.toThrow("扫描不完整");
   }, 30_000);
 });
+
+test("automatic local history follows registered Bot additions and rejects removed identities even while files remain", async () => {
+  const botId = `n1-${"a".repeat(32)}`;
+  const config = { dataDir: data, botIds: [] as string[], autoDiscoverBots: true };
+  const automatic = new HistoryReader(config);
+  const catalog = (ids: string[]) => writeFile(join(data, "bots.json"), JSON.stringify({
+    schemaVersion: 3, bots: ids.map(botId => ({ botId, desiredState: "stopped", archived: false })),
+  }));
+  await catalog([]);
+  expect((await automatic.listSessions()).sessions).toEqual([]);
+  const target = join(data, "bots", botId, "workspace", "BINDING", ".clawsynapse", "omp-sessions", `2026-05-14T10-12-03_${ID}.jsonl`);
+  await save([header(), message("u", null, "user", "automatic history")], target);
+  await writeFile(join(data, "bots", botId, "config.json"), JSON.stringify({ role: "agent", bindingRevision: "BINDING" }));
+  const consoleId = `n1-${"c".repeat(32)}`;
+  await mkdir(join(data, "bots", consoleId), { recursive: true });
+  await writeFile(join(data, "bots", consoleId, "config.json"), JSON.stringify({ role: "console" }));
+  await catalog([botId, consoleId]);
+  const listing = await automatic.listSessions();
+  expect(listing.sessions.map(session => session.botId)).toEqual([botId]);
+  expect(listing.warnings).toEqual([]);
+  const session = listing.sessions[0]!;
+  expect((await automatic.readSession(session)).blocks[0]!.text).toContain("automatic history");
+  await catalog([]);
+  expect((await automatic.listSessions()).sessions).toEqual([]);
+  await expect(automatic.readSession(session)).rejects.toThrow("配置的 Bot");
+  await catalog([botId]);
+  expect((await automatic.listSessions()).sessions.map(item => item.sessionId)).toEqual([ID]);
+});

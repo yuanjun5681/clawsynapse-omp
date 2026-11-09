@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { lstat, open, opendir, realpath } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { LIMITS, type Config, type RequestMetadata } from "./types.ts";
+import { discoverBotIds } from "./config.ts";
 
 export interface SessionSummary {
   path: string;
@@ -56,12 +57,19 @@ const pretty = (v: unknown): string => typeof v === "string" ? v : JSON.stringif
 /** No cache: each read observes title edits, truncation and same-size rewrites afresh. */
 export class HistoryReader {
   private readonly dataDir: string;
-  private readonly botIds: Set<string>;
-  constructor(config: Pick<Config, "dataDir" | "botIds">) {
+  private botIds: Set<string>;
+  constructor(private readonly config: Pick<Config, "dataDir" | "botIds" | "autoDiscoverBots">) {
     if (!isAbsolute(config.dataDir)) fail("历史 DataDir 必须是绝对路径");
     this.dataDir = resolve(config.dataDir);
     if (config.botIds.some(id => !NAME.test(id))) fail("历史 Bot ID 包含非法路径字符");
     this.botIds = new Set(config.botIds);
+  }
+
+  private async refreshBots(): Promise<void> {
+    if (!this.config.autoDiscoverBots) return;
+    const ids = await discoverBotIds(this.dataDir);
+    this.config.botIds = ids;
+    this.botIds = new Set(ids);
   }
 
   private async root(): Promise<string> { return realpath(this.dataDir); }
@@ -101,6 +109,7 @@ export class HistoryReader {
   }
 
   private async location(session: SessionSummary): Promise<Location> {
+    await this.refreshBots();
     const root = await this.root();
     // Accept only canonical paths produced from the configured root, never normalize away '..'.
     const path = session.path;
@@ -273,7 +282,7 @@ export class HistoryReader {
   }
 
   // Daemon BotConfig: bots/<botId>/config.json, top-level bindingRevision and role.
-  private async currentBinding(root: string, botId: string): Promise<string> {
+  private async currentBinding(root: string, botId: string): Promise<string | undefined> {
     const path = join(root, "bots", botId, "config.json");
     await this.safePath(root, path);
     const before = await lstat(path);
@@ -298,6 +307,7 @@ export class HistoryReader {
       const linked = await lstat(path);
       if (after.dev !== linked.dev || after.ino !== linked.ino || after.mtimeMs !== before.mtimeMs || after.size !== before.size) fail("Bot config.json 在读取时被替换或重写");
       await this.safePath(root, path);
+      if (object(config) && config.role === "console") return undefined;
       if (!object(config) || !nonempty(config.bindingRevision) || !NAME.test(config.bindingRevision) || config.role !== "agent") fail("Bot 配置缺少有效的 Agent bindingRevision");
       return config.bindingRevision;
     } finally { await file.close(); }
@@ -318,6 +328,8 @@ export class HistoryReader {
   }
 
   private async discoverSessions(): Promise<{ sessions: SessionSummary[]; warnings: string[]; failures: string[] }> {
+    await this.refreshBots();
+    if (!this.botIds.size) return { sessions: [], warnings: [], failures: [] };
     const root = await this.root();
     const sessions: SessionSummary[] = [];
     const warnings: string[] = [];
@@ -405,8 +417,8 @@ export class HistoryReader {
   }
 
   async findRequest(request: RequestMetadata): Promise<RequestMatch[]> {
-    if (!this.botIds.has(request.botId)) fail("请求 Bot 不在历史配置范围内");
     const listing = await this.discoverSessions();
+    if (!this.botIds.has(request.botId)) fail("请求 Bot 不在历史配置范围内");
     // Partial active tails and unknown binding state do not invalidate saved associations.
     // Unreadable/omitted candidates must never silently become a negative lookup.
     if (listing.failures.length) fail(`请求关联扫描不完整: ${listing.failures.join("；")}`);

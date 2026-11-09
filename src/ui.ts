@@ -9,7 +9,8 @@ export function formatStatus(view: ObserverView, width: number): string {
   const paused = view.bots.find(bot => bot.state === "paused");
   const connected = view.bots.filter(bot => bot.state === "connected").length;
   let status: string;
-  if (paused) status = `观察已暂停 · ${paused.detail ?? "容量受限/存储失败"} · ${count} 条未查看`;
+  if (view.discovery) status = `${view.discovery.state === "waiting" ? "等待本地 Bot" : view.discovery.state === "offline" ? "daemon 离线" : "自动发现失败"} · ${view.discovery.detail}`;
+  else if (paused) status = `观察已暂停 · ${paused.detail ?? "容量受限/存储失败"} · ${count} 条未查看`;
   else if (connected && connected < view.bots.length) status = `${connected}/${view.bots.length} Bot 可用 · ${count} 条新请求`;
   else if (view.bots.some(bot => bot.state === "error")) status = `查询失败 · ${count} 条未查看`;
   else if (view.bots.some(bot => bot.state === "offline")) status = `离线 · ${count} 条未查看`;
@@ -164,6 +165,7 @@ export async function openPanel(ctx: ExtensionContext, options: PanelOptions): P
     const connectionText = () => [
       `endpoint: ${options.config.endpoint}`, `DataDir: ${options.config.dataDir}`, `stateDir: ${options.config.stateDir}`,
       ...options.config.botIds.map(botId => `Bot: ${botId}`), options.observationError ?? "",
+      ...(options.getView()?.discovery ? [options.getView()!.discovery!.detail] : []),
       ...(options.getView()?.bots.map(bot => `${bot.botId}: ${bot.state}${bot.detail ? ` · ${bot.detail}` : ""}`) ?? []),
       "", "仅展示已落盘历史；文件停止增长不代表已完成。", "观察范围跟随当前交互会话；不同 UUID 不共享全局未读数。",
     ].join("\n");
@@ -285,7 +287,9 @@ export async function openPanel(ctx: ExtensionContext, options: PanelOptions): P
         paintedRows = [];
         if (busy) lines.push(theme.fg("muted", "读取中… Esc 可关闭"));
         else if (page.kind === "menu") {
-          if (!page.rows.length) lines.push(page.section === "sessions" ? "暂无已落盘会话。n 查看新请求，r 刷新。" : "暂无条目；r 刷新，Backspace 返回。");
+          if (!page.rows.length) lines.push(options.config.autoDiscoverBots && !options.config.botIds.length
+            ? "尚无已注册的本地 Bot；在 ClawSynapse 中创建后按 r 刷新。"
+            : page.section === "sessions" ? "暂无已落盘会话。n 查看新请求，r 刷新。" : "暂无条目；r 刷新，Backspace 返回。");
           if (page.selected < page.top) page.top = page.selected;
           if (page.selected >= page.top + bodyHeight) page.top = page.selected - bodyHeight + 1;
           for (let index = page.top; index < Math.min(page.rows.length, page.top + bodyHeight); index++) {
@@ -327,7 +331,8 @@ export async function openPanel(ctx: ExtensionContext, options: PanelOptions): P
           while (lines.length < bodyHeight + headerHeight) lines.push("");
           lines.push(theme.fg("muted", truncate(`第 ${page.page + 1} 页 · 消息 ${Math.min(start.block + 1, page.transcript.blocks.length)}/${page.transcript.blocks.length}${nextReadingPosition ? " · 下页继续" : " · 已到底"}   b 分支  a 子Agent  r 刷新`)));
         }
-        const displayedNotice = paintWarning ? `${paintWarning}${notice ? `；${notice}` : ""}` : notice;
+        const discoveryNotice = view?.discovery?.detail ?? "";
+        const displayedNotice = [paintWarning, discoveryNotice, notice].filter(Boolean).join("；");
         lines.push(theme.fg(displayedNotice ? "warning" : "muted", truncate(displayedNotice || " ")));
         lines.push(theme.fg("muted", truncate(page.kind === "conversation" ? "PgUp/PgDn 翻页   ←/→ 消息   Enter 展开/折叠工具与 thinking" : page.kind === "detail" ? "PgUp/PgDn 翻页" : "↑/↓ 选择   Enter 打开   r 刷新")));
         lines.push(theme.fg("muted", truncate("Backspace 返回上一级   Esc 关闭   n 新请求   i 信息")));

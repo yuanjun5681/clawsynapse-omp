@@ -201,3 +201,176 @@ describe("ObserverStore durable observation", () => {
     expect(store.snapshot()).toEqual({ revision: 1, cursors: { "bot-a": 10 }, unread: [] });
   });
 });
+
+describe("ObserverStore local catalog membership", () => {
+  test("adding a Bot preserves existing cursors and unread requests without rebaselining", () => {
+    const store = open(fixture({ autoDiscoverBots: true }));
+    store.commitPage("bot-a", 0, undefined, 7, []);
+    const before = store.commitPage("bot-a", 1, 7, 8, [request("saved-a")]);
+    store.setBotIds(["bot-a", "bot-b"]);
+    expect(store.snapshot()).toEqual(before);
+    expect(() => store.commitPage("bot-a", 2, undefined, 99, [])).toThrow(/cursor/i);
+    expect(store.commitPage("bot-b", 2, undefined, 20, [])).toEqual({
+      revision: 3, cursors: { "bot-a": 8, "bot-b": 20 }, unread: [request("saved-a")],
+    });
+    expect(store.commitPage("bot-a", 3, 8, 9, [request("later-a")])).toEqual({
+      revision: 4, cursors: { "bot-a": 9, "bot-b": 20 }, unread: [request("saved-a"), request("later-a")],
+    });
+  });
+
+  test("removal hides but retains observations and rejects inactive or foreign acknowledgements atomically", () => {
+    const config = fixture({ autoDiscoverBots: true, botIds: ["bot-a", "bot-b"] });
+    const store = open(config);
+    store.commitPage("bot-a", 0, undefined, 0, []);
+    store.commitPage("bot-b", 1, undefined, 5, []);
+    store.commitPage("bot-a", 2, 0, 1, [request("saved-a")]);
+    const savedB = request("saved-b", { botId: "bot-b" });
+    const durable = store.commitPage("bot-b", 3, 5, 6, [savedB]);
+    store.setBotIds(["bot-b"]);
+    const onlyB = { revision: 4, cursors: { "bot-b": 6 }, unread: [savedB] };
+    expect(store.snapshot()).toEqual(onlyB);
+    expect(() => store.acknowledge([savedB, request("saved-a")], 4)).toThrow();
+    expect(() => store.acknowledge([{ botId: "foreign", messageId: "saved-b" }], 4)).toThrow();
+    expect(() => store.commitPage("bot-a", 4, 1, 2, [request("hidden")])).toThrow();
+    expect(store.snapshot()).toEqual(onlyB);
+    store.setBotIds(["bot-a", "bot-b"]);
+    expect(store.snapshot()).toEqual(durable);
+    store.close();
+    const reopened = open({ ...config, botIds: ["bot-b"] });
+    expect(reopened.snapshot()).toEqual(onlyB);
+    expect(() => reopened.commitPage("bot-b", 4, undefined, 99, [])).toThrow(/cursor/i);
+    reopened.setBotIds(["bot-a", "bot-b"]);
+    expect(() => reopened.commitPage("bot-a", 4, undefined, 99, [])).toThrow(/cursor/i);
+    expect(reopened.snapshot()).toEqual(durable);
+  });
+
+  test("zero membership at startup or reopening never clears durable state or revision", () => {
+    const config = fixture({ autoDiscoverBots: true, botIds: [] });
+    const store = open(config);
+    expect(store.snapshot()).toEqual({ revision: 0, cursors: {}, unread: [] });
+    store.setBotIds(["bot-a"]);
+    store.commitPage("bot-a", 0, undefined, 10, []);
+    const durable = store.commitPage("bot-a", 1, 10, 11, [request("retained")]);
+    store.setBotIds([]);
+    expect(store.snapshot()).toEqual({ revision: 2, cursors: {}, unread: [] });
+    expect(() => store.acknowledge([request("retained")], 2)).toThrow();
+    store.close();
+    const empty = open(config);
+    expect(empty.snapshot()).toEqual({ revision: 2, cursors: {}, unread: [] });
+    empty.close();
+    const restored = open({ ...config, botIds: ["bot-a"] });
+    expect(restored.snapshot()).toEqual(durable);
+    expect(() => restored.commitPage("bot-a", 2, undefined, 99, [])).toThrow(/cursor/i);
+    expect(restored.snapshot()).toEqual(durable);
+  });
+
+  test("windows with different memberships share revision CAS while exposing only their active Bots", () => {
+    const config = fixture({ autoDiscoverBots: true });
+    const first = open(config);
+    first.commitPage("bot-a", 0, undefined, 0, []);
+    const rendered = first.commitPage("bot-a", 1, 0, 1, [request("shown-a")]);
+    const second = open({ ...config, botIds: ["bot-b"] });
+    expect(second.snapshot()).toEqual({ revision: 2, cursors: {}, unread: [] });
+    second.commitPage("bot-b", 2, undefined, 0, []);
+    expect(() => first.commitPage("bot-a", 2, 1, 2, [request("later-a")])).toThrow(/revision/i);
+    first.commitPage("bot-a", 3, 1, 2, [request("later-a")]);
+    const savedB = request("saved-b", { botId: "bot-b" });
+    expect(() => second.commitPage("bot-b", 3, 0, 1, [savedB])).toThrow(/revision/i);
+    second.commitPage("bot-b", 4, 0, 1, [savedB]);
+    expect(() => first.acknowledge(rendered.unread, rendered.revision)).toThrow(/revision/i);
+    expect(first.acknowledge(rendered.unread, 5)).toEqual({
+      revision: 6, cursors: { "bot-a": 2 }, unread: [request("later-a")],
+    });
+    expect(second.snapshot()).toEqual({ revision: 6, cursors: { "bot-b": 1 }, unread: [savedB] });
+  });
+
+  test("automatic scope markers remain isolated from unchanged explicit Bot-set scopes", () => {
+    const config = fixture({ autoDiscoverBots: true });
+    const automatic = open(config);
+    automatic.commitPage("bot-a", 0, undefined, 7, []);
+    const explicit = open({ ...config, autoDiscoverBots: false });
+    expect(explicit.snapshot()).toEqual({ revision: 0, cursors: {}, unread: [] });
+    expect(() => explicit.setBotIds(["bot-a"])).toThrow();
+    explicit.commitPage("bot-a", 0, undefined, 99, []);
+    automatic.setBotIds(["bot-a", "bot-b"]);
+    expect(automatic.snapshot()).toEqual({ revision: 1, cursors: { "bot-a": 7 }, unread: [] });
+    expect(open({ ...config, autoDiscoverBots: false, botIds: ["bot-a", "bot-b"] }).snapshot()).toEqual({
+      revision: 0, cursors: {}, unread: [],
+    });
+    expect(open({ ...config, autoDiscoverBots: false }).snapshot().cursors).toEqual({ "bot-a": 99 });
+    expect(() => open({ ...config, autoDiscoverBots: false, botIds: [] })).toThrow();
+  });
+
+  test("membership updates copy their input and reject malformed IDs without changing the active set", () => {
+    const store = open(fixture({ autoDiscoverBots: true }));
+    store.commitPage("bot-a", 0, undefined, 7, []);
+    const botIds = ["bot-a"];
+    store.setBotIds(botIds);
+    botIds.push("bot-b");
+    expect(() => store.commitPage("bot-b", 1, undefined, 0, [])).toThrow();
+    expect(() => store.setBotIds(["bot-b", ""])).toThrow();
+    expect(store.snapshot()).toEqual({ revision: 1, cursors: { "bot-a": 7 }, unread: [] });
+    store.close();
+    expect(() => store.setBotIds([])).toThrow(/关闭/);
+  });
+
+  test("inactive retained requests still consume queue capacity and failed pages roll back", () => {
+    const store = open(fixture({ autoDiscoverBots: true }));
+    store.commitPage("bot-a", 0, undefined, 0, []);
+    store.commitPage("bot-a", 1, 0, LIMITS.unreadCount, Array.from({ length: LIMITS.unreadCount }, (_, i) => request(`r-${i}`)));
+    store.setBotIds(["bot-b"]);
+    store.commitPage("bot-b", 2, undefined, 0, []);
+    const savedB = request("extra-b", { botId: "bot-b" });
+    expect(() => store.commitPage("bot-b", 3, 0, 1, [savedB])).toThrow(/capacity|容量/i);
+    expect(store.snapshot()).toEqual({ revision: 3, cursors: { "bot-b": 0 }, unread: [] });
+    store.setBotIds(["bot-a", "bot-b"]);
+    expect(store.snapshot().unread).toHaveLength(LIMITS.unreadCount);
+    expect(store.snapshot().cursors).toEqual({ "bot-a": LIMITS.unreadCount, "bot-b": 0 });
+    store.acknowledge([{ botId: "bot-a", messageId: "r-0" }], 3);
+    const accepted = store.commitPage("bot-b", 4, 0, 1, [savedB]);
+    expect(accepted.revision).toBe(5);
+    expect(accepted.unread).toHaveLength(LIMITS.unreadCount);
+    expect(accepted.unread.at(-1)).toEqual(savedB);
+  });
+
+  test("inactive cursor and metadata rows are validated before snapshots hide them", () => {
+    const config = fixture({ autoDiscoverBots: true });
+    const store = open(config);
+    store.commitPage("bot-a", 0, undefined, 0, []);
+    store.commitPage("bot-a", 1, 0, 1, [request("saved")]);
+    store.setBotIds([]);
+    const database = new Database(join(config.stateDir, "observers.sqlite3"));
+    try {
+      database.run("UPDATE cursors SET bot_id = ''");
+      expect(() => store.snapshot()).toThrow(/cursor/i);
+      database.run("UPDATE cursors SET bot_id = 'bot-a'");
+      const invalid = JSON.stringify(request("saved", { from: "bot-a" }));
+      database.query("UPDATE unread SET metadata = ?, bytes = ?").run(invalid, Buffer.byteLength(invalid));
+      expect(() => store.snapshot()).toThrow(/元数据/);
+      expect(() => open({ ...config, botIds: [] })).toThrow(/元数据/);
+      const valid = JSON.stringify(request("saved"));
+      database.query("UPDATE unread SET metadata = ?, bytes = ?, message_id = 'mismatch'").run(valid, Buffer.byteLength(valid));
+      expect(() => store.snapshot()).toThrow(/请求 ID/);
+    } finally {
+      database.close();
+    }
+  });
+
+  test("explicit scopes continue rejecting persisted rows for unselected Bots", () => {
+    const config = fixture();
+    const store = open(config);
+    store.commitPage("bot-a", 0, undefined, 0, []);
+    store.commitPage("bot-a", 1, 0, 1, [request("saved")]);
+    const database = new Database(join(config.stateDir, "observers.sqlite3"));
+    try {
+      database.run("UPDATE cursors SET bot_id = 'foreign'");
+      expect(() => store.snapshot()).toThrow(/cursor/i);
+      database.run("UPDATE cursors SET bot_id = 'bot-a'");
+      const foreign = JSON.stringify(request("saved", { botId: "foreign" }));
+      database.query("UPDATE unread SET bot_id = 'foreign', metadata = ?, bytes = ?").run(foreign, Buffer.byteLength(foreign));
+      expect(() => store.snapshot()).toThrow(/元数据/);
+    } finally {
+      database.close();
+    }
+  });
+});

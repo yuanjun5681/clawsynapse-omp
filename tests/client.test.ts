@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { Database } from "bun:sqlite";
-import { chmodSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { RequestObserver } from "../src/client.ts";
@@ -31,11 +31,11 @@ function scheduler() {
     },
   };
 }
-function fixture(handler: (request: Request) => Response | Promise<Response>, botIds = ["bot-a"]) {
-  const root = mkdtempSync(join(tmpdir(), "clawsynapse-client-"));
+function fixture(handler: (request: Request) => Response | Promise<Response>, botIds = ["bot-a"], extra: Partial<Config> = {}) {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "clawsynapse-client-")));
   mkdirSync(join(root, "data"), { mode: 0o700 });
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: handler });
-  const config: Config = { endpoint: `http://127.0.0.1:${server.port}`, dataDir: join(root, "data"), stateDir: join(root, "state"), botIds, pollIntervalMs: 1000, tokenFiles: {} };
+  const config: Config = { endpoint: `http://127.0.0.1:${server.port}`, dataDir: join(root, "data"), stateDir: join(root, "state"), botIds, pollIntervalMs: 1000, tokenFiles: {}, ...extra };
   const store = new ObserverStore(config, "01234567-89ab-4cde-8f01-234567890abc");
   const timers = scheduler();
   const changes: ObserverView[] = [];
@@ -337,5 +337,75 @@ describe("RequestObserver HTTP seam", () => {
     expect(received).toHaveLength(1);
     expect(observer.getSnapshot().bots[0]?.state).toBe("paused");
     expect(JSON.stringify(observer.getSnapshot())).not.toContain("fixture-secret-token");
+  });
+
+  test("local catalog changes add baselines without resetting existing requests and recover after empty or damaged discovery", async () => {
+    const a = `n1-${"a".repeat(32)}`, b = `n1-${"b".repeat(32)}`;
+    const cursors: Record<string, number> = { [a]: 5, [b]: 9 };
+    const afters: { botId: string; after: string | null }[] = [];
+    const f = fixture(request => {
+      const url = new URL(request.url);
+      if (url.pathname === "/v2/health") return Response.json({ ok: true, code: "daemon.healthy", data: {} });
+      if (url.pathname.endsWith("/peers")) return Response.json({ ok: true, code: "peers.ok", data: { items: [] } });
+      const botId = url.pathname.split("/")[3]!;
+      const after = url.searchParams.get("after");
+      afters.push({ botId, after });
+      const cursor = cursors[botId]!;
+      const items = after === null ? [envelope(cursor, { id: `${botId}-${cursor}`, to: botId })]
+        : Array.from({ length: Math.max(0, cursor - Number(after)) }, (_, i) => {
+          const value = Number(after) + i + 1;
+          return envelope(value, { id: `${botId}-${value}`, to: botId });
+        });
+      return page(items, cursor);
+    }, [], { autoDiscoverBots: true });
+    const catalog = (ids: string[]) => writeFileSync(join(f.config.dataDir, "bots.json"), JSON.stringify({
+      schemaVersion: 3, bots: ids.map(botId => ({ botId, desiredState: "stopped", archived: false })),
+    }));
+    await f.observer.refresh();
+    expect(f.observer.getSnapshot().discovery?.state).toBe("waiting");
+    catalog([a]);
+    await f.observer.refresh();
+    expect(f.observer.getSnapshot().observation).toMatchObject({ cursors: { [a]: 5 }, unread: [] });
+    cursors[a] = 6;
+    await f.observer.refresh();
+    catalog([a, b]);
+    cursors[a] = 7;
+    await f.observer.refresh();
+    expect(f.observer.getSnapshot().observation.unread.map(item => item.messageId)).toEqual([`${a}-6`, `${a}-7`]);
+    expect(f.observer.getSnapshot().observation.cursors).toEqual({ [a]: 7, [b]: 9 });
+    catalog([b]);
+    await f.observer.refresh();
+    expect(f.observer.getSnapshot().bots.map(bot => bot.botId)).toEqual([b]);
+    expect(f.observer.getSnapshot().observation.unread).toEqual([]);
+    catalog([a, b]);
+    cursors[a] = 8;
+    await f.observer.refresh();
+    expect(f.observer.getSnapshot().observation.unread.map(item => item.messageId)).toEqual([`${a}-6`, `${a}-7`, `${a}-8`]);
+    const durable = f.store.snapshot();
+    const calls = afters.length;
+    writeFileSync(join(f.config.dataDir, "bots.json"), "{broken");
+    await f.observer.refresh();
+    expect(f.observer.getSnapshot().discovery?.state).toBe("error");
+    expect(f.store.snapshot()).toEqual(durable);
+    expect(afters.length).toBe(calls);
+    catalog([a, b]);
+    await f.observer.refresh();
+    expect(f.observer.getSnapshot().discovery).toBeUndefined();
+    expect(f.observer.getSnapshot().observation.unread).toEqual(durable.unread);
+  });
+
+  test("an empty local catalog checks daemon health without following redirects or sending Bot credentials", async () => {
+    let followed = false;
+    const credentials: (string | null)[] = [];
+    const f = fixture(request => {
+      credentials.push(request.headers.get("authorization"));
+      if (new URL(request.url).pathname !== "/v2/health") { followed = true; return page([], 0); }
+      return new Response(null, { status: 302, headers: { location: "/wrong-service" } });
+    }, [], { autoDiscoverBots: true, tokenFiles: { unused: "/must-not-read-token" } });
+    await f.observer.refresh();
+    expect(followed).toBe(false);
+    expect(credentials).toEqual([null]);
+    expect(f.observer.getSnapshot().discovery?.state).toBe("error");
+    expect(f.store.snapshot().cursors).toEqual({});
   });
 });

@@ -109,3 +109,15 @@
 后续按 [测试计划](testing.md) 执行剩余场景。凭据应直接配置到隔离测试环境，不写入项目、验收记录或聊天；不自动复用生产认证。
 
 本轮专用 daemon/NATS 进程已停止，Orb `clawsynapse-omp-test` 已确认 stopped；保留 guest 的私有测试数据便于后续模型验收。guest 源码副本是本轮验收快照，继续前须重新同步当前仓库与 lockfile。没有停止或改写原有 ubuntu/ubuntu-2。
+
+## 零配置连接与本地 Bot 自动同步
+
+- 默认不要求 `~/.omp/clawsynapse.json`：使用 `http://127.0.0.1:18080` 和 `~/.clawsynapse`，引用 schemaVersion 3 的 `bots.json`。上游依据为相邻 ClawSynapse 的 `docs/operations.md`、`docs/api.md`、`internal/app/manager.go`；本地 catalog 是注册身份真源，不通过扫描目录激活未知 Bot，不读取身份私钥或复制 token。
+- `bun run check` 通过。针对 config/state/client/history 的首次回归为 102 pass、2 fail；其中发现并修复了自动历史刷新在遍历 Set 时原地清空/重新添加导致重复扫描的问题，改为替换集合、保留正在遍历的快照。另删除了把“回退检测的最近消息查询”误判为“重新建立基线”的错误断言。随后仅重跑两个失败场景，2 pass、0 fail、18 次断言；其余 102 项未重复执行。本轮没有运行未改动的 crash 测试。
+- 新增行为覆盖无配置启动、空安装、完整项目覆盖、注册表损坏/重复/不支持版本/超限/符号链接、遗留目录不激活、自动范围持久化、并发窗口、隐藏数据容量核算、移除后恢复及保留未查看集合。显式范围保留原作用域；自动范围使用稳定 `local-catalog` 标识，避免每次 Bot 增删重建基线。
+- macOS arm64 实际 `omp/18.18.3`，110×38 PTY 与 VT 屏幕解析；全新 HOME/XDG、默认路径、独立会话和状态库。确认 `~/.omp/clawsynapse.json` 从始至终不存在；本轮拥有的合成 HTTP 服务绑定默认 `127.0.0.1:18080`，没有访问生产 daemon、Bot、凭据或历史，没有模型推理。
+- 首先无数据/无 Bot 启动，屏幕显示等待本地 Bot，实际收到 `/v2/health` 查询。随后写入合成 schema-3 catalog 和 A 的专用历史，自动建立 cursor=5 基线；增加 cursor=6 后状态栏显示 1 条新请求，`/clawsynapse` 展示 A 历史，Enter 连续显示合成 user/assistant 内容，SQLite 中该请求仍未查看。
+- 不重启 omp，新增 B 后范围自动变为 2，按 r 可见 B 历史；移出 A 后范围变为 1，刷新后不再显示 A 历史。重新加入 A 后，其原未查看请求重新可见，SQLite 中 A cursor 仍为 6；按 n 实际绘制该条后未查看计数变为 0，Esc 返回主界面。
+- 另在默认端口没有服务时启动第二份全新 HOME，屏幕显示 daemon 离线，历史面板仍可打开并说明暂无本地 Bot；随后启动合成服务，无须重启 omp 即恢复为等待 Bot。未自动创建或启动任何身份。
+- README、设计和测试计划已改为默认自动发现、可选人工覆盖。真实 Agent 模型/工具/子 Agent 验收仍未完成；本节不扩大此前兼容性矩阵或真实 daemon 集成的证明范围。
+- 自动发现包含 Console Bot；其合法的“无 Harness 绑定”不会被误报为历史损坏。扩展自动历史回归同时注册 Agent 与 Console，验证仅列出实际历史、无绑定警告、移出后拒绝旧身份路径、重新加入可继续读取；单独执行该场景 1 pass、0 fail、7 次断言。

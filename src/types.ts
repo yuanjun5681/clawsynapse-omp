@@ -3,6 +3,8 @@ export interface Config {
   dataDir: string;
   stateDir: string;
   botIds: string[];
+  /** Follow the registered local Bot catalog rather than a fixed user selection. */
+  autoDiscoverBots?: boolean;
   pollIntervalMs: number;
   tokenFiles: Record<string, string>;
 }
@@ -38,6 +40,7 @@ export interface ObserverView {
   bots: BotConnection[];
   /** Display-only names, scoped by receiving Bot and sender ID; never persisted as identity. */
   peerNames: Record<string, Record<string, string>>;
+  discovery?: { state: "waiting" | "offline" | "error"; detail: string };
 }
 
 export interface ObserverOptions {

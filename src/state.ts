@@ -40,10 +40,11 @@ function regularPrivateFile(path: string, mainDatabase = false): void {
   if (stat.uid !== process.getuid?.() || (stat.mode & 0o777) !== 0o600) throw new Error("观察数据库必须由当前用户拥有且权限为 0600");
   if (mainDatabase && stat.size > LIMITS.databaseBytes) fail("ObservationCapacityError", "状态库 capacity 超过 64 MiB");
 }
-function normalizeMetadata(input: RequestMetadata, botIds: Set<string>): { value: RequestMetadata; json: string; bytes: number } {
-  if (!input || !botIds.has(input.botId) || typeof input.messageId !== "string" || !input.messageId ||
-      (input.type !== "chat.message" && input.type !== "task.assign") || typeof input.from !== "string" || !input.from ||
-      input.from === input.botId || !safeInteger(input.timestamp) || input.timestamp > 8_640_000_000_000_000) throw new Error("请求元数据格式非法");
+function normalizeMetadata(input: RequestMetadata, botIds?: Set<string>): { value: RequestMetadata; json: string; bytes: number } {
+  if (!input || typeof input.botId !== "string" || !input.botId || (botIds !== undefined && !botIds.has(input.botId)) ||
+      typeof input.messageId !== "string" || !input.messageId || (input.type !== "chat.message" && input.type !== "task.assign") ||
+      typeof input.from !== "string" || !input.from || input.from === input.botId || !safeInteger(input.timestamp) ||
+      input.timestamp > 8_640_000_000_000_000) throw new Error("请求元数据格式非法");
   const value: RequestMetadata = { botId: input.botId, messageId: input.messageId, type: input.type, from: input.from, timestamp: input.timestamp };
   for (const key of ["requestId", "runId", "sessionKey"] as const) {
     if (input[key] !== undefined) {
@@ -61,11 +62,13 @@ function normalizeMetadata(input: RequestMetadata, botIds: Set<string>): { value
 export class ObserverStore {
   private readonly db: Database;
   private readonly scope: string;
-  private readonly botIds: Set<string>;
+  private readonly autoDiscoverBots: boolean;
+  private botIds: Set<string>;
   private closed = false;
 
   constructor(config: Config, sessionId: string) {
-    if (!sessionId || !config.botIds.length || config.botIds.some((id) => typeof id !== "string" || !id)) throw new Error("观察范围缺少 session 或 Bot ID");
+    this.autoDiscoverBots = config.autoDiscoverBots === true;
+    if (!sessionId || (!config.botIds.length && !this.autoDiscoverBots) || config.botIds.some((id) => typeof id !== "string" || !id)) throw new Error("观察范围缺少 session 或 Bot ID");
     const dataDir = canonicalPath(config.dataDir);
     const stateDir = canonicalPath(config.stateDir);
     if (dirname(stateDir) === stateDir || stateDir === canonicalPath(homedir())) throw new Error("stateDir 必须为独立专用目录，不能是 HOME 或文件系统根");
@@ -74,7 +77,7 @@ export class ObserverStore {
     if (!/^https?:$/.test(endpoint.protocol) || endpoint.username || endpoint.password || endpoint.search || endpoint.hash ||
         !["127.0.0.1", "[::1]", "localhost"].includes(endpoint.hostname) || !/^\/*$/.test(endpoint.pathname)) throw new Error("观察 endpoint 必须是明确的 loopback HTTP origin");
     this.botIds = new Set([...config.botIds].sort());
-    this.scope = JSON.stringify([sessionId, endpoint.origin, dataDir, [...this.botIds]]);
+    this.scope = JSON.stringify([sessionId, endpoint.origin, dataDir, this.autoDiscoverBots ? "local-catalog" : [...this.botIds]]);
     mkdirSync(stateDir, { recursive: true, mode: 0o700 });
     const directory = lstatSync(stateDir);
     if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid?.() || (directory.mode & 0o777) !== 0o700) {
@@ -132,6 +135,14 @@ export class ObserverStore {
       this.db.close();
       throw error;
     }
+  }
+
+  /** Change only this window's visible catalog membership; retained observations and revision are unchanged. */
+  setBotIds(botIds: string[]): void {
+    if (this.closed) throw new Error("观察数据库已关闭");
+    if (!this.autoDiscoverBots) throw new Error("固定观察范围不允许更改 Bot ID");
+    if (botIds.some((id) => typeof id !== "string" || !id)) throw new Error("观察范围 Bot ID 非法");
+    this.botIds = new Set(botIds);
   }
 
   snapshot(): ObservationState {
@@ -195,17 +206,17 @@ export class ObserverStore {
     if (revision === undefined || !safeInteger(revision)) throw new Error("观察数据库 revision 损坏");
     const cursors: Record<string, number> = Object.create(null);
     for (const row of this.db.query<{ bot_id: string; cursor: number }, [string]>("SELECT bot_id, cursor FROM cursors WHERE scope = ?").all(this.scope)) {
-      if (!this.botIds.has(row.bot_id) || !safeInteger(row.cursor)) throw new Error("观察数据库 cursor 损坏");
-      cursors[row.bot_id] = row.cursor;
+      if (typeof row.bot_id !== "string" || !row.bot_id || (!this.autoDiscoverBots && !this.botIds.has(row.bot_id)) || !safeInteger(row.cursor)) throw new Error("观察数据库 cursor 损坏");
+      if (this.botIds.has(row.bot_id)) cursors[row.bot_id] = row.cursor;
     }
     const unread: RequestMetadata[] = [];
     // Local insertion order, not opaque message IDs or remote clocks, defines the latest observed source.
     const rows = this.db.query<{ bot_id: string; message_id: string; metadata: string; bytes: number }, [string, number]>("SELECT bot_id, message_id, metadata, bytes FROM unread WHERE scope = ? ORDER BY rowid LIMIT ?").all(this.scope, LIMITS.unreadCount + 1);
     for (const row of rows) {
       if (row.bytes > LIMITS.metadataBytes || Buffer.byteLength(row.metadata) !== row.bytes) throw new Error("观察数据库 metadata 损坏");
-      const item = normalizeMetadata(JSON.parse(row.metadata) as RequestMetadata, this.botIds).value;
+      const item = normalizeMetadata(JSON.parse(row.metadata) as RequestMetadata, this.autoDiscoverBots ? undefined : this.botIds).value;
       if (item.botId !== row.bot_id || item.messageId !== row.message_id) throw new Error("观察数据库请求 ID 损坏");
-      unread.push(item);
+      if (this.botIds.has(item.botId)) unread.push(item);
     }
     return { revision, cursors, unread };
   }

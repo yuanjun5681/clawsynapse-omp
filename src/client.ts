@@ -1,5 +1,7 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
 import { ObserverStore } from "./state.ts";
+import { discoverBotIds } from "./config.ts";
+import { errorText } from "./safety.ts";
 import { LIMITS, type BotConnection, type Config, type ObservationState, type ObserverOptions, type ObserverView, type RequestKey, type RequestMetadata } from "./types.ts";
 
 class PollFailure extends Error {
@@ -88,6 +90,7 @@ export class RequestObserver {
   private stopped = false;
   private pollCancel?: () => void;
   private flight?: { generation: number; promise: Promise<void> };
+  private discovery?: ObserverView["discovery"];
 
   constructor(config: Config, private readonly store: ObserverStore, private readonly options: ObserverOptions) {
     this.config = structuredClone(config);
@@ -120,7 +123,8 @@ export class RequestObserver {
   refresh(): Promise<void> { return this.beginRound(true); }
 
   getSnapshot(): ObserverView {
-    return structuredClone({ observation: this.observation, bots: [...this.bots.values()], peerNames: this.peerNames });
+    return structuredClone({ observation: this.observation, bots: [...this.bots.values()], peerNames: this.peerNames,
+      ...(this.discovery ? { discovery: this.discovery } : {}) });
   }
 
   acknowledge(keys: RequestKey[]): void {
@@ -172,7 +176,39 @@ export class RequestObserver {
     return promise;
   }
 
+  private async synchronizeBots(generation: number, signal: AbortSignal): Promise<boolean> {
+    try {
+      const ids = await discoverBotIds(this.config.dataDir);
+      if (signal.aborted || this.stopped || generation !== this.generation) return false;
+      this.store.setBotIds(ids);
+      this.config.botIds = ids;
+      const active = new Set(ids);
+      for (const id of this.bots.keys()) {
+        if (!active.has(id)) { this.bots.delete(id); this.paused.delete(id); delete this.peerNames[id]; }
+      }
+      for (const botId of ids) if (!this.bots.has(botId)) this.bots.set(botId, { botId, state: "connecting" });
+      this.observation = this.store.snapshot();
+      this.discovery = undefined;
+      if (!ids.length) {
+        const health = await this.requestJSON("", new URL("/v2/health", this.config.endpoint), signal);
+        if (typeof health !== "object" || health === null || !("ok" in health) || health.ok !== true ||
+            !("code" in health) || health.code !== "daemon.healthy") throw new PollFailure("本机端点未返回有效的 ClawSynapse daemon 健康状态", "error");
+        if (signal.aborted || this.stopped || generation !== this.generation) return false;
+        this.discovery = { state: "waiting", detail: "本机暂无已注册 Bot；创建后将自动发现" };
+      }
+      this.publish(generation);
+      return ids.length > 0;
+    } catch (error) {
+      if (signal.aborted || this.stopped || generation !== this.generation) return false;
+      this.discovery = { state: error instanceof PollFailure && error.state === "offline" ? "offline" : "error",
+        detail: error instanceof PollFailure ? error.message : `本地 Bot 发现失败：${errorText(error)}` };
+      this.publish(generation);
+      return false;
+    }
+  }
+
   private async runRound(generation: number, signal: AbortSignal): Promise<void> {
+    if (this.config.autoDiscoverBots && !await this.synchronizeBots(generation, signal)) return;
     try { this.observation = this.store.snapshot(); }
     catch (error) {
       if (this.stopped || generation !== this.generation) return;

@@ -10,7 +10,7 @@
 
 - 已安装的 omp，建议使用 **18.13.3 或更新版本**。
 - 已安装的 Git，用于从 GitHub 下载插件。
-- 正在本机运行的 ClawSynapse daemon，以及需要查看的完整本地 Bot ID。
+- 已安装的 ClawSynapse；接收新请求提示需要本机 daemon 正在运行。
 - 对 ClawSynapse 本地数据目录的读取权限。
 
 从公开 GitHub 仓库安装：
@@ -21,41 +21,48 @@ omp plugin install github:yuanjun5681/clawsynapse-omp
 
 插件通过 [GitHub 仓库](https://github.com/yuanjun5681/clawsynapse-omp)分发，不需要从 npm 安装。
 
-安装后完成下方配置，再重启 omp。插件不会替你安装或启动 ClawSynapse daemon。
+安装后重启 omp，输入 `/clawsynapse` 即可使用，**不需要创建插件配置文件或填写 Bot ID**。插件不会替你安装或启动 ClawSynapse daemon。
 
 **最低支持基线为 omp 18.13.3**：该版本所需公开扩展接口齐全，并已通过通知、历史浏览及已查看确认的实测，不要求安装最新版本。更早的 18.2.10 虽已通过基本功能实测，但依赖当时尚未公开的会话接口，不作为推荐安装环境。旧宿主缺少功能时，插件会尽可能安全降级；能安装不代表功能完整。
 
-## 配置
+## 自动连接与 Bot 同步
 
-手动创建 `~/.omp/clawsynapse.json`，所有工作区共用：
+默认连接 `http://127.0.0.1:18080`，从 `~/.clawsynapse/bots.json` 引用 ClawSynapse 已注册的全部本地 Bot，并从 `~/.clawsynapse/bots/` 读取它们的历史。不复制或另外维护一份 Bot 列表，也不读取身份私钥或自动复制 token。
+
+- 新增或移除 Bot 后，通知范围会在后续轮询中自动同步，不需要重启 omp；历史列表按 `r` 刷新。
+- 新发现的 Bot 从当前收件进度开始观察。其他 Bot 已有的游标和未查看请求不会因列表变化重置。
+- 移出的 Bot 不再显示，但插件保留它已有的观察状态；重新注册同一 Bot 后继续使用。未注册的遗留目录不会自动纳入范围。
+- daemon 未启动时显示离线，启动后自动重连；没有 Bot 时显示等待提示，不会自动创建或启动 Bot。已有本地历史不依赖 daemon 在线。
+
+插件状态保存在 `~/.omp/clawsynapse`，不写入 ClawSynapse 的配置或历史。可选配置文件仍为 `~/.omp/clawsynapse.json`。旧版状态不会自动迁移；如需继续使用旧状态，可通过 `stateDir` 显式指定原目录。
+
+## 可选配置
+
+只有使用非默认端口、数据目录，或只想查看指定 Bot 时，才需要创建 `~/.omp/clawsynapse.json`。所有字段均可省略，省略项使用默认值。例如：
 
 ```json
 {
-  "endpoint": "http://127.0.0.1:18080",
-  "dataDir": "~/.clawsynapse",
-  "stateDir": "~/.clawsynapse-omp",
-  "botIds": ["n1-00000000000000000000000000000001"],
-  "pollIntervalMs": 1000
+  "endpoint": "http://127.0.0.1:19090",
+  "dataDir": "/srv/clawsynapse"
 }
 ```
 
-请按实际环境修改：
-
 | 字段 | 说明 |
 | --- | --- |
-| `endpoint` | 本机 daemon 地址。仅支持明确的回环 IP，例如 `127.0.0.1` 或 `[::1]`，不能使用 `localhost` 或远程地址。 |
+| `endpoint` | 本机 daemon 地址，默认 `http://127.0.0.1:18080`。仅接受明确的回环 IP，不接受 `localhost` 或远程地址。 |
 | `dataDir` | ClawSynapse 的实际本地数据目录，默认 `~/.clawsynapse`。 |
-| `stateDir` | 插件保存通知游标和已查看状态的专用目录，默认 `~/.clawsynapse-omp`，不能与 `dataDir` 相同或互相包含。 |
-| `botIds` | 要查看的完整本地 Bot ID 列表。示例 ID 必须替换；插件不会自动选择或创建 Bot。 |
-| `pollIntervalMs` | 检查新请求的间隔，单位为毫秒，默认 `1000`。 |
+| `stateDir` | 插件专用状态目录，默认 `~/.omp/clawsynapse`，不能与 `dataDir` 相同或互相包含。 |
+| `botIds` | 可选的完整本地 Bot ID 列表。**不填写时自动同步本地注册列表**；填写后仅查看这些 Bot，不再自动扩展范围。 |
+| `pollIntervalMs` | 检查新请求和 Bot 变化的间隔，单位为毫秒，默认 `1000`。 |
+| `tokenFiles` | 可选的按完整 Bot ID 索引的私有 token 文件路径对象。默认使用 daemon 的本机无 token 读取模式。 |
 
-目录路径可使用绝对路径或 `~/` 开头的路径。插件与 daemon 必须能通过同一回环网络访问；在容器中运行时尤其需要注意。
+目录路径可使用绝对路径或 `~/` 开头的路径。插件与 daemon 必须能通过同一回环网络访问；在容器中运行时尤其需要注意。自定义 `endpoint` 时，也需确认 `dataDir` 属于同一部署。
 
-修改配置后重启 omp。
+已有旧版插件配置时，移除 `botIds` 即可启用自动同步。自动范围和手动指定范围各自保存观察状态，切换模式不会复制或清空旧模式的数据。
 
-### 需要 token 的连接
+### 可选的 scoped token
 
-如果 daemon 要求 token，在配置中增加 `tokenFiles`，按完整 Bot ID 指定现有 token 文件：
+如需使用 Bot 的 scoped token，可增加 `tokenFiles` 字段，例如：
 
 ```json
 "tokenFiles": {
@@ -63,13 +70,13 @@ omp plugin install github:yuanjun5681/clawsynapse-omp
 }
 ```
 
-Bot ID 必须同时出现在 `botIds` 中，文件路径必须指向实际 token 文件。文件须为当前用户拥有的私有常规文件，不能是符号链接；不要在配置中填写 token 明文。未配置时，使用 daemon 提供的本机无 token 读取模式。
+示例 ID 和路径必须换成实际值；显式设置 `botIds` 时，token 对应的 Bot 必须在其中。文件须为当前用户拥有的私有常规文件，不能是符号链接。不要在配置中填写 token 明文。
 
 ### 项目专属配置
 
-如果某个项目需要连接不同的 Bot，可在启动 omp 的项目目录中创建 `.omp/clawsynapse.json`，格式相同。
+可在启动 omp 的项目目录中创建 `.omp/clawsynapse.json`，格式相同。项目配置会**整份替代**用户配置，不合并 Bot、token 或其他字段；省略项使用默认值，而不是继承用户配置。项目文件损坏或无法读取时会直接报错，不会悄悄切换连接。
 
-项目配置会**整份替代**用户配置，不合并 Bot、token 或其他字段。仅在项目配置不存在时，才使用 `~/.omp/clawsynapse.json`；项目配置损坏或无法读取时会直接报错，不会悄悄切换连接。
+修改可选配置后重启 omp。两处配置都不存在时，直接使用默认连接和自动发现。
 
 ## 使用
 
@@ -153,7 +160,7 @@ omp plugin uninstall clawsynapse-omp
 
 ### 找不到历史或内容不完整
 
-插件只查看配置 Bot 的 ClawSynapse 专用本地 omp 历史，包括旧绑定下的历史；不会列出普通 omp 会话。请检查 `dataDir`、`botIds` 和本地历史文件是否存在。
+插件只查看本地已注册 Bot（或可选配置指定 Bot）的 ClawSynapse 专用 omp 历史，包括旧绑定下的历史，不列出普通 omp 会话。请检查 ClawSynapse 数据目录和注册列表；仅在自定义部署或指定范围时检查 `dataDir`、`botIds`。注册列表损坏、缺失但仍有 Bot 数据，或不支持其版本时，会明确报错，不会通过扫描目录猜测身份。
 
 图片和其他附件只显示是否存在，不展示内容。不支持的历史版本、损坏文件或超过读取上限的数据会明确报错，不会静默跳过后继续标记为已查看。
 

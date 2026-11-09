@@ -102,6 +102,7 @@ export default function clawsynapse(pi: ExtensionAPI) {
           },
           onChange: view => {
             if (ticket !== generation || active !== session) return;
+            if (session.config.autoDiscoverBots) session.config.botIds = view.bots.map(bot => bot.botId);
             ctx.ui.setStatus("clawsynapse", formatStatus(view, process.stdout.columns || 80));
             for (const listener of session.listeners) listener();
           },
@@ -115,7 +116,7 @@ export default function clawsynapse(pi: ExtensionAPI) {
       }
     } catch (error) {
       if (ticket !== generation) return;
-      startupError = `配置错误：${errorText(error)}。请检查用户 ~/.omp/clawsynapse.json 或项目 .omp/clawsynapse.json`;
+      startupError = `配置或本地 Bot 发现失败：${errorText(error)}。默认读取 ~/.clawsynapse/bots.json；仅自定义连接需要 ~/.omp/clawsynapse.json`;
       ctx.ui.setStatus("clawsynapse", "ClawSynapse · 配置错误 · /clawsynapse 查看原因");
     }
   };

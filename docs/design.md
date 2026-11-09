@@ -74,7 +74,7 @@ GET <endpoint>/v2/bots/<botId>/messages?after=<cursor>&limit=100
 - 在观察范围内以 `(botId,messageId)` 去重；游标与未查看的最小元数据一起保存，不保存完整 payload。已提交 cursor 之前的记录不重放，不维护无限增长的已查看 ID 数组。
 - `/clawsynapse` 展示独立的“新请求”列表；只有当前视口实际完成渲染的条目才可确认查看，不能把列表分页中未显示的条目一起确认。确认提交显式 ID 集合，不按当前总数或“全部”清空，不能清除显示快照之后才到达的请求。
 - 请求尚未产生原生历史时显示“暂无本地处理历史”；即使已查看也不声称任务已执行。
-- 数据集回退、Bot 被移除或本地数据被替换时显示明确错误；不悄悄把旧 cursor 应用到新数据集。可通过最近消息 cursor 辅助检查回退，但现有接口没有 journal generation，不能保证检测到所有同 ID 数据替换情况。
+- 自动模式中，Bot 移出注册列表后停止查询并隐藏其观察数据，不删除持久 cursor 或未查看记录；重新加入时继续原进度。显式选择模式中 Bot 消失仍报告查询错误。数据集回退或本地数据替换时不悄悄重建基线；现有接口没有 journal generation，不能保证检测到所有同 ID 数据替换情况。
 
 #### 持久化与提交顺序
 
@@ -82,7 +82,7 @@ GET <endpoint>/v2/bots/<botId>/messages?after=<cursor>&limit=100
 
 使用 Bun 内置 `bun:sqlite`，在插件自有 `stateDir/observers.sqlite3` 保存状态；不引入 ORM 或可替换存储后端。状态库带 schemaVersion，目录权限 0700，数据库及其事务文件权限 0600；拒绝把数据库放在 daemon 数据树、原生历史目录或网络文件系统中。插件状态只写自有库；当前交互会话 header 只交由 omp 的公开接口保存，不直接改写 JSONL，不写被查看的会话及引用文件。
 
-- 观察键为 `(当前交互式 omp session UUID, 规范化 endpoint, 规范化 DataDir, 排序去重后的 Bot ID 集合)`。使用公开 `ctx.sessionManager.getSessionId()` 获取当前交互会话 ID，不用被查看的 Bot 原生 session ID。
+- 观察键为 `(当前交互式 omp session UUID, 规范化 endpoint, 规范化 DataDir, 范围标识)`；显式模式的范围标识仍为排序去重的 Bot ID 集合，自动模式为稳定的 `local-catalog`。因此自动列表增删不会创建新范围或重置其他 Bot 的游标。被移出 Bot 的数据保留并计入容量，但从当前快照隐藏；重新注册恢复。不同模式的数据不混用或自动迁移。使用公开 `ctx.sessionManager.getSessionId()` 获取当前交互会话 ID，不用被查看的 Bot 原生 session ID。
 - 开始建立基线或恢复观察前，调用公开 `ctx.sessionManager.ensureOnDisk()`，并核实 `getSessionFile()` 提供的持久文件存在、header.id 与当前 UUID 一致；这样没有 assistant 回答的新会话也有可 resume 的身份。该操作只针对当前交互会话，若其文件位于被观察 Bot 历史读取树中则禁用观察。缺失公开能力、`--no-session` 无持久文件或宿主保存失败时显示明确错误，不启动通知轮询；只读历史面板仍可使用。不以 SQLite 中存在一个无法恢复的 UUID 记录冒充重启恢复。
 - 同一观察范围恢复已提交游标及未查看数据；新范围先成功提交基线，再宣告连接完成。普通分支和树导航不回退观察状态；产生新 UUID 的 fork/branch 是新观察范围，不继承旧游标或未查看记录。新会话 header 已由宿主保存是恢复前提，不能仅因 `getSessionId()` 返回字符串就宣称可恢复。
 - 状态表保存各 Bot 的 cursor、未查看元数据和观察范围 revision。使用 SQLite 事务、`journal_mode=DELETE`、`synchronous=EXTRA`；启动时核对设置，未知 schema 拒绝写入。事务内不进行网络请求、目录扫描或 UI 渲染，锁冲突立即返回，交由下一轮调度重试，不同步等待锁而卡住 TUI。
@@ -102,6 +102,7 @@ GET <endpoint>/v2/bots/<botId>/messages?after=<cursor>&limit=100
 | 资源 | 上限及行为 |
 |---|---|
 | HTTP 响应 | 每页解压后的响应体最多 8 MiB；流式计数并在超限时取消，不能先无界 `response.json()` 再检查 |
+| 自动发现 | 注册表最多 1 MiB、1000 个 Bot；只读 schemaVersion 3 的 `DataDir/bots.json`，拒绝损坏、重复身份、符号链接与非法路径，不扫描目录激活未知 Bot |
 | 请求元数据 | 单条序列化后最多 8 KiB，仅包含关联 ID、来源和时间等必要字段；超限整页拒绝提交，不截断唯一键 |
 | 未查看队列 | 每观察范围最多 1000 条且元数据总计不超过 8 MiB；整页事务若超限则回滚并暂停消费，用户查看释放容量后再追赶 |
 | 状态库 | 最多 128 个观察范围，主库最多 64 MiB（通过页数限制约束）；不得自动淘汰旧范围或未查看记录，新范围/写入超限时报告容量错误 |
@@ -170,19 +171,19 @@ SessionState 中只有隔离后的摘要与 native UUID，且成功完成后才�
 
 ## 7. 插件配置
 
-默认使用用户级 `~/.omp/clawsynapse.json`，所有工作区直接可用；可选的 `<cwd>/.omp/clawsynapse.json` 具有整份替换优先级，不与用户配置按字段合并，防止混用不同部署的 Bot/token。仅当项目配置不存在（ENOENT）时读取用户配置；项目文件损坏、不可读或为 symlink 时直接报错，不通过回退切换身份。两处均不存在时报告配置错误；不向上搜索父目录。这是插件自有配置，不是 omp 内置配置项，配置变化通过重启插件所在 omp 会话生效。配置来源不改变按交互会话 UUID 隔离的观察范围。
+插件配置是可选覆盖，不是首次使用前置条件。两处配置都不存在时，使用 `http://127.0.0.1:18080`、`~/.clawsynapse`、`~/.omp/clawsynapse` 和每秒轮询，并自动引用 `DataDir/bots.json` 的全部注册 Bot。状态目录归属于 omp，配置文件仍为 `~/.omp/clawsynapse.json`；不自动迁移旧状态，显式 `stateDir` 不变。优先读取 `<cwd>/.omp/clawsynapse.json`，不存在时读取 `~/.omp/clawsynapse.json`；项目文件整份替代用户文件，省略项使用默认值，不按字段继承，防止混用部署与 token。损坏、不可读或为 symlink 时报错，不回退切换身份。不向上搜索父目录。覆盖文件修改后重启；自动注册列表在每轮轮询、历史列表刷新及读取时重载，无须重启。
 
 ```json
 {
   "endpoint": "http://127.0.0.1:18080",
   "dataDir": "~/.clawsynapse",
-  "stateDir": "~/.clawsynapse-omp",
-  "botIds": ["<完整的本地 Bot ID>"],
+  "stateDir": "~/.omp/clawsynapse",
+  "botIds": ["<可选：只查看指定 Bot 时填写完整本地 ID，否则省略此字段>"],
   "pollIntervalMs": 1000
 }
 ```
 
-- `botIds` 显式指定观察范围；不默认访问所有本机 Bot，不通过插件创建身份。
+- 省略 `botIds` 时自动发现；显式非空列表仍为固定范围，不擅自扩展。仅以 schemaVersion 3 的注册 catalog 为真源，包含停止和归档 Bot，不读取凭据或创建身份。无数据的新安装返回空范围；catalog 缺失但 Bot 数据仍存在时必须报错恢复原表，不扫描目录猜测。空范围会查询 `GET /v2/health`，区分 daemon 离线和等待创建 Bot；目录发现失败保留现有状态并暂停该轮消息读取，后续轮询重试。
 - endpoint 仅允许明确的 loopback 地址，不允许远端地址；拒绝重定向。HTTP 请求不使用环境代理把本机请求送到外部。
 - DataDir 必须解析为本机绝对目录；不从请求 payload、会话正文或 header.cwd 动态改写读取根。
 - `stateDir` 解析为本机绝对目录，与 DataDir 及原生历史读取根分离；测试必须显式指定独立目录，不能复用生产状态库。改变 stateDir 不自动复制旧观察状态。

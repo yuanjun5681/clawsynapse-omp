@@ -40,7 +40,7 @@ orb -m clawsynapse-omp-test
 2. 安装锁定版本的 Bun、omp、ClawSynapse 和启用 JetStream 的 NATS Server；记录版本。仅在 guest 中配置一次性模型凭据，确认实际调用可用；不从宿主复制整个认证目录。
 3. 清理继承环境并设置测试 HOME/XDG。启动独立 JetStream，确认它使用测试存储目录及测试端口。用 ClawSynapse `init` 的显式 `--config`、`--data-dir`、`--local-api-addr`、`--nats-servers` 参数初始化，运行 `clawsynapsed --config` 指向这份配置；不安装系统服务。
 4. 在同一 guest 的另一终端创建/启动测试 Bot 并建立测试信任。先用 Console 收件链路验证真实业务请求可达，再准备两个 omp Agent 的模型和 binding。
-5. 插件实现后，在 guest 的 `~/.omp/clawsynapse.json` 显式填写 guest 内的 loopback endpoint、DataDir、stateDir 和两个接收方完整 ID，再加载插件。用 `/tmp` 等无项目配置的目录启动，核实用户级默认生效；另用完整项目 `.omp/clawsynapse.json` 验证整份覆盖、不混入用户 Bot/token，损坏或 symlink 项目配置不得回退。面板中核实数据根和 Bot，再开始发送请求。
+5. 先验证无插件配置：在隔离 HOME 的默认 `~/.clawsynapse` 与 `127.0.0.1:18080` 启动测试 daemon，在 `/tmp` 启动 omp，直接打开 `/clawsynapse`。核实自动引用注册表、新增/移除/恢复 Bot 不重置已有 cursor 或未查看集合、未知目录不被选中、daemon 离线后恢复。自定义测试端口/DataDir 时，另在用户配置中只填写 endpoint、dataDir、stateDir，不填写 botIds；再用显式 botIds 和完整项目配置验证固定范围、整份覆盖、不混用 token，以及损坏或 symlink 配置拒绝回退。面板中核实数据根和 Bot，再发送请求。
 6. 执行第 5 节场景，并在 daemon 停止后重开历史面板证明离线读取。发布前在 macOS 独立目录补做真实 TUI smoke，覆盖终端宽度、Esc/返回、状态栏、同 UUID 恢复及 SQLite 权限/同步设置。
 
 Docker 路径使用相同逻辑场景：实现后制作包含固定版本依赖的测试镜像，非 root 运行，交互验收分配 PTY，故障数据用独立 volume 或限额 tmpfs；不要求容器内运行 systemd。无模型凭据的 CI 只报告其实际覆盖层级，不冒充完整集成通过。
@@ -69,6 +69,7 @@ Docker 路径使用相同逻辑场景：实现后制作包含固定版本依赖�
 | 事务崩溃 | 通过私有测试同步点，在 COMMIT 前和 COMMIT 后/发布 UI 前分别强杀写入进程，再重开库 | 只出现完整旧状态或完整新状态；不能出现新 cursor 配旧未查看集合。恢复后继续补读结果与未崩溃对照一致 |
 | 存储故障 | 非 root 下制造不可写目录、第二连接持写锁、限额文件系统写满 | 明确报错且不推进 cursor/提前确认；TUI 不同步等待锁。释放故障后从已提交状态继续，不删库重建基线 |
 | 范围与数据集变化 | 两 Bot/不同 endpoint、DataDir、绑定、观察范围；测试数据回退 | 不跨范围复用 cursor，不混淆旧 binding；可识别回退时显式报错。无 generation 的同 ID 替换检测限制必须保留，不能宣称已全面解决 |
+| 自动 Bot 同步 | 无配置启动、空注册表、运行中新增/移除/恢复 Bot、损坏或缺失注册表 | 默认检查本机 daemon，不创建身份；新增 Bot 单独建立基线，既有 cursor/未查看不重置；移出仅隐藏、恢复继续；损坏时不继续消费、不扫描未知目录，修复后可继续 |
 | 真实工具与子 Agent | 在两个 omp Agent 上执行可控请求，至少一次真实工具调用、一次真实委派；同一 sessionKey 再发送请求 | 面板展示真实工具参数/结果与请求起点，按调用 ID/所选分支配对；恢复会话不凭一次请求拆文件，子 Agent 按父会话归组 |
 | 历史格式与破损 | title 前导、多分支、compaction/reset、半行补全、中间损坏、重写/替换、未知版本 | 默认分支可解释，旧消息保留，半行刷新后可读；损坏/不支持版本显式提示，不跨坏节点拼对话 |
 | 路径与只读 | guest 内放越界 symlink、伪造 cwd/parentSession；停止历史写入者后对读取树做前后散列 | 拒绝越界，不读取哨兵内容；历史文件及引用文件散列和目录成员不变，只有独立 stateDir 可写 |
