@@ -124,6 +124,8 @@ omp 状态栏中的 `ClawSynapse` 会提示新请求。来源优先显示本地�
 
 ## 更新与卸载
 
+当前版本 **0.1.1**：适配原生主题输入 `instruction/publicContext/requiredContext`，修复标题与用户正文直接显示 JSON，并通过持久化收执关联主题请求历史。
+
 更新已安装的 GitHub 版本：
 
 ```sh
