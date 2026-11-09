@@ -230,7 +230,7 @@ src/
 
 ## 9. 依赖与发布
 
-使用 `@oh-my-pi/pi-coding-agent` 的公开类型，开发依赖固定版本以保证类型检查可复现，但不以该版本作为宿主要求，不声明精确版本 peer dependency，不自动安装或升级 omp。兼容性依据所需公开能力检查与实际验证记录，不要求“最新版本”。缺少会话保存/托管定时器能力时禁用观察而保留历史查看；缺少终端绘制回调时请求列表只读、不自动确认，并持续显示具体原因。打包采用 `package.json` 的 `omp.extensions`，可使用 `omp --extension <path>` 开发、`omp plugin link <path>` 本地安装，再独立以 npm 或 Git 发布。
+使用 `@oh-my-pi/pi-coding-agent` 的公开类型，开发依赖固定版本以保证类型检查可复现，但不以该版本作为宿主要求，不声明精确版本 peer dependency，不自动安装或升级 omp。最低支持基线选择 18.13.3：所需接口已全部公开，且已通过隔离 TUI 冒烟验证；更早的 18.2.10 虽可完整运行，但 `ensureOnDisk` 尚未纳入扩展公开类型，不作为推荐安装环境。精确边界、来源和实测范围见 [版本兼容评估](compatibility.md)。运行期仍依据公开能力检查：缺少会话保存/托管定时器能力时禁用观察而保留历史查看；缺少终端绘制回调时请求列表只读、不自动确认，并持续显示具体原因。打包采用 `package.json` 的 `omp.extensions`，通过公开 GitHub 仓库分发。
 
 不复用 clawsynapse 的 Go internal 包；HTTP 与磁盘布局是跨项目依赖。布局变化集中修改 history 模块，协议变化集中修改 client 模块。现阶段不新增 daemon endpoint；若将来要求低延迟推送，再另行定义带 cursor 补读的 SSE 契约，不为单向通知引入 WebSocket。
 
@@ -259,7 +259,7 @@ src/
 
 详细来源与版本差异记录在 [本地历史调研](omp-plugin-history.md)。其 `internal/...` 来源路径均属于相邻 `clawsynapse` 项目，不属于本插件源码。
 
-早期设计曾核对本机缓存 omp 18.13.3 的 `appendEntry`、会话延迟保存及 `ReadonlySessionManager`，据此选择插件自有 SQLite 与宿主 `ensureOnDisk`。实现针对 18.18.3 的公开类型，并用真实 TUI 验证了空会话可恢复身份；不能将这两个版本之间的源码相似视作兼容范围。真实 omp Agent 的模型凭据、工具/子 Agent 执行样本与完整验收仍缺失，尚未声明可发布兼容范围。
+早期设计曾核对本机缓存 omp 18.13.3 的 `appendEntry`、会话延迟保存及 `ReadonlySessionManager`，据此选择插件自有 SQLite 与宿主 `ensureOnDisk`。实现针对 18.18.3 的公开类型；后续通过上游版本对照及真实 TUI 验证，将公开接口最低支持基线确定为 18.13.3，不以版本间源码相似性推断兼容。真实 omp Agent 的模型凭据、工具/子 Agent 执行样本与完整验收仍缺失；最低版本冒烟验证不等于全部发布验收通过。
 
 官方参考：
 

@@ -5,7 +5,7 @@ title: "omp 插件本地会话历史调研"
 
 # omp 插件本地会话历史调研
 
-本文由 `clawsynapse/docs/omp-plugin-history.md` 迁移至插件项目，保留原调研证据。文中 `internal/...` 路径、“本仓 adapter”及相关实现均指相邻的 `clawsynapse` 项目；本插件总体方案见 [插件设计](design.md)。本机检查结果是调研时快照，不是部署配置或当前实时状态。
+本文由 `clawsynapse/docs/omp-plugin-history.md` 迁移至插件项目，保留原调研结论；公开版本已隐去本机用户名、Bot ID、绑定标识和项目目录名。文中 `internal/...` 路径、“本仓 adapter”及相关实现均指相邻的 `clawsynapse` 项目；本插件总体方案见 [插件设计](design.md)。本机检查结果是调研时快照，不是部署配置或当前实时状态。
 
 ## 范围与结论
 
@@ -66,15 +66,15 @@ ClawSynapse 的 omp adapter 明确传入 `--session-dir`，因此其主会话位
 
 ## 本机只读检查结果
 
-本机默认 DataDir 为 `/Users/lalo/.clawsynapse`。已发现一个配置为 omp 的 Bot，其专用原生目录实际存在：
+本机使用默认 DataDir `~/.clawsynapse`。已发现一个配置为 omp 的 Bot，其专用原生目录实际存在（以下路径已脱敏）：
 
 ```text
-/Users/lalo/.clawsynapse/bots/n1-dc69c3923c8945bf38b6b2784b447f37/workspace/QIWJTFRQXYLZZX4IJ5DF7HYE4M/.clawsynapse/omp-sessions/
+~/.clawsynapse/bots/<botId>/workspace/<bindingRevision>/.clawsynapse/omp-sessions/
 ```
 
 检查时该目录为空，未找到可用于验证来源标记的 ClawSynapse 原生 omp 历史样本；不据此推断其他 DataDir 或已经清理的历史。
 
-普通 omp 根目录下存在 `--Volumes-UWorks-Projects-clawsynapse--` 与 `--Volumes-UWorks-Projects-clawsynapse-bot--` 等项目会话目录。这些 header.cwd 指向开发仓库，不是 Bot 隔离工作目录，不能仅因路径含 clawsynapse 就认定它们是远端请求的处理历史。只读抽样确认了 title v1、session v3 及 user/assistant/toolResult 等记录形状，未输出消息正文。
+普通 omp 根目录下还存在本地开发项目的会话目录。这些 header.cwd 指向开发仓库，不是 Bot 隔离工作目录，不能仅因路径含 clawsynapse 就认定它们是远端请求的处理历史。只读抽样确认了 title v1、session v3 及 user/assistant/toolResult 等记录形状，未输出消息正文。
 
 工具统计数据库只能作辅助索引，不能代替对专用目录的发现与 JSONL header 校验。
 

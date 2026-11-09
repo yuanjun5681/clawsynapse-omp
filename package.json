@@ -4,6 +4,13 @@
   "private": true,
   "type": "module",
   "description": "Read-only ClawSynapse request notifications and native omp history viewer",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yuanjun5681/clawsynapse-omp.git"
+  },
+  "homepage": "https://github.com/yuanjun5681/clawsynapse-omp#readme",
+  "bugs": {"url": "https://github.com/yuanjun5681/clawsynapse-omp/issues"},
   "files": ["src", "README.md", "docs"],
   "omp": {"extensions": ["./src/index.ts"]},
   "scripts": {"check": "tsc --noEmit", "test": "bun test"},
